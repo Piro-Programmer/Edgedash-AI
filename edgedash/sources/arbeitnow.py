@@ -95,7 +95,7 @@ class ArbeitnowSource:
         """
         raw: list[dict[str, Any]] = []
 
-        for page in range(1, _MAX_PAGES + 1):
+        for page in range(1, config.fetch_max_pages + 1):
             if page > 1:
                 time.sleep(_REQ_DELAY)
 
@@ -118,7 +118,7 @@ class ArbeitnowSource:
                 print(f"  [arbeitnow] Page {page}: no keyword matches — stopping.")
                 break
 
-        print(f"  [arbeitnow] Fetched {len(raw)} raw listings across up to {_MAX_PAGES} page(s).")
+        print(f"  [arbeitnow] Fetched {len(raw)} raw listings across up to {config.fetch_max_pages} page(s).")
 
         # Step 1 — keyword filter
         kw_matched = [j for j in raw if _matches_keywords(j, config.keywords)]

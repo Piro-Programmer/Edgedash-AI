@@ -42,6 +42,11 @@ _DEFAULTS: dict = {
     "weight_location_fit": 0.15,
     "weight_recency": 0.15,
     "skill_aliases": {},
+    "fetch_interval_hours": 6,
+    "fetch_max_pages": 5,
+    "fetch_max_listings": 200,
+    "score_max_seconds": 300,
+    "analyse_max_seconds": 60,
 }
 
 _CONFIG_FILENAME = "config.yaml"
@@ -68,6 +73,11 @@ class Config:
     weight_location_fit: float = 0.15
     weight_recency: float = 0.15
     skill_aliases: dict[str, str] = field(default_factory=dict)
+    fetch_interval_hours: float = 6.0
+    fetch_max_pages: int = 5
+    fetch_max_listings: int = 200
+    score_max_seconds: int = 300
+    analyse_max_seconds: int = 60
 
 
 def load_config(repo_root: Path | None = None) -> Config:
@@ -112,6 +122,11 @@ def load_config(repo_root: Path | None = None) -> Config:
         weight_location_fit=float(data["weight_location_fit"]),
         weight_recency=float(data["weight_recency"]),
         skill_aliases=_as_str_dict(data["skill_aliases"], "skill_aliases"),
+        fetch_interval_hours=float(data["fetch_interval_hours"]),
+        fetch_max_pages=_as_int(data["fetch_max_pages"], "fetch_max_pages"),
+        fetch_max_listings=_as_int(data["fetch_max_listings"], "fetch_max_listings"),
+        score_max_seconds=_as_int(data["score_max_seconds"], "score_max_seconds"),
+        analyse_max_seconds=_as_int(data["analyse_max_seconds"], "analyse_max_seconds"),
     )
 
 

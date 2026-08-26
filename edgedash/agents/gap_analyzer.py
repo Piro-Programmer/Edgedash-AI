@@ -25,6 +25,7 @@ Snapshot written via storage — never overwrites previous runs  (rule 25).
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -42,8 +43,29 @@ _TOP_N = 10                     # gaps reported in the snapshot
 class GapAnalyzer:
     name: str = "GapAnalyzer"
 
-    def run(self, config: Config, storage_path: str) -> AgentResult:
+    def run(
+        self,
+        config: Config,
+        storage_path: str,
+        stop_conditions: "StopConditions | None" = None,
+    ) -> AgentResult:
+        from edgedash.planning import StopConditions as SC
+
+        max_seconds = (
+            stop_conditions.max_seconds
+            if stop_conditions and stop_conditions.max_seconds is not None
+            else config.analyse_max_seconds
+        )
+        deadline = time.monotonic() + max_seconds if max_seconds else None
+
+        t0 = time.monotonic()
         listings = storage.get_scored_listings_with_cache(storage_path)
+
+        if deadline and time.monotonic() > deadline:
+            return AgentResult(
+                agent=self.name, status="failed", records_touched=0,
+                notes=f"aborted: max_seconds={max_seconds} exceeded loading listings",
+            )
 
         analysed = [l for l in listings if l.get("facts")]
         if not analysed:

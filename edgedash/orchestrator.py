@@ -1,127 +1,149 @@
 """
-orchestrator.py — reads state, decides what to run, delegates to agents,
-logs every outcome, and prints a readable cycle summary.
+orchestrator.py — state-driven cycle runner (steering rules 28-33).
 
-The Orchestrator never fetches data or scores listings directly.
-It only reads state and calls agents.
+What this file does:
+  1. Read system state via state.read_state()
+  2. Build a plan via planning.build_plan()
+  3. Print the plan before executing anything          (rule 31)
+  4. Execute only the active tasks, passing each task's
+     goal and stop_conditions to the agent             (rule 29)
+  5. Wrap each task in try/except; log failure and
+     continue with remaining tasks                     (rule 32)
+  6. Write exactly ONE summary row to cycle_log        (rule 33)
+  7. Outcome: complete | partial | nothing_to_do
+
+What this file does NOT do:
+  - fetch, score, or analyse anything
+  - decide limits (those come from planning.build_plan)
+  - know anything about agents beyond their name
 """
 
 from __future__ import annotations
 
+import json
+import time
 from datetime import datetime, timezone
+from typing import Any
 
 import edgedash.storage as storage
-from edgedash.agents import make_fetcher, Scorer, GapAnalyzer
-from edgedash.agents.base import Agent, AgentResult
+from edgedash.agents.base import AgentResult
 from edgedash.config import Config
-
-
-def _build_pipeline(config: Config) -> list[Agent]:
-    """Construct the ordered agent pipeline for this cycle."""
-    return [
-        make_fetcher(config),
-        Scorer(),
-        GapAnalyzer(),
-    ]
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+from edgedash.planning import Plan, Task, build_plan
+from edgedash.state import read_state
 
 _SEP = "─" * 60
 
+# ---------------------------------------------------------------------------
+# Agent registry — the ONLY place the Orchestrator couples to agent classes.
+# To add a fourth agent: import it here, add one line to _REGISTRY.
+# ---------------------------------------------------------------------------
+
+def _build_registry(config: Config) -> dict[str, Any]:
+    from edgedash.agents import make_fetcher, Scorer, GapAnalyzer
+    return {
+        "Fetcher":     make_fetcher(config),
+        "MockFetcher": make_fetcher(config),
+        "Scorer":      Scorer(),
+        "GapAnalyzer": GapAnalyzer(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _print_state(last_fetch: str | None, unscored: int) -> None:
+def _print_state(state: Any) -> None:
     print(_SEP)
     print("  STATE")
     print(_SEP)
-    if last_fetch:
-        print(f"  Last fetch   : {last_fetch}")
+    if state.last_fetch_at:
+        hrs = f"{state.hours_since_fetch:.1f}h ago" if state.hours_since_fetch is not None else ""
+        print(f"  Last fetch     : {state.last_fetch_at[:19]}  ({hrs})")
     else:
-        print("  Last fetch   : never (fresh database)")
-    print(f"  Unscored     : {unscored} listing(s)")
+        print("  Last fetch     : never")
+    print(f"  Unscored       : {state.unscored_count}")
+    print(f"  Gaps computed  : {state.gaps_computed_at[:19] if state.gaps_computed_at else 'never'}"
+          f"  ({'stale' if state.gaps_stale else 'fresh'})")
+    print(f"  Last verdict   : {state.last_cycle_verdict or 'none'}")
     print()
 
 
-def _print_plan(decisions: list[tuple[Agent, str]]) -> None:
-    print(_SEP)
-    print("  PLAN")
-    print(_SEP)
-    for agent, reason in decisions:
-        print(f"  {agent.name:<20} → {reason}")
-    print()
+def _print_result(task: Task, result: AgentResult, duration: float) -> None:
+    icon = "✓" if result.status in ("ok", "suspect") else "✗"
+    print(
+        f"  {icon}  {result.agent:<14}  "
+        f"status={result.status:<8}  "
+        f"new={result.records_touched}  "
+        f"{duration:.1f}s"
+        + (f"  |  {result.notes}" if result.notes else "")
+    )
 
 
-def _print_result(result: AgentResult) -> None:
-    icon = "✓" if result.status == "ok" else "✗"
-    status_label = result.status.upper()
-    print(f"  {icon}  {result.agent:<20} [{status_label}]  "
-          f"records touched: {result.records_touched}")
-    if result.notes:
-        print(f"     {result.notes}")
-
-
-def _print_summary(results: list[AgentResult], cycle_start: str) -> None:
-    finished = _utcnow()
-    ok_count = sum(1 for r in results if r.status == "ok")
-    fail_count = len(results) - ok_count
-    total_records = sum(r.records_touched for r in results)
+def _print_summary(
+    outcome: str,
+    ran: list[tuple[Task, AgentResult, float]],
+    skipped: list[Task],
+    cycle_start: str,
+    cycle_duration: float,
+) -> None:
+    failed = sum(1 for _, r, _ in ran if r.status == "failed")
+    total_records = sum(r.records_touched for _, r, _ in ran)
 
     print()
     print(_SEP)
     print("  CYCLE SUMMARY")
     print(_SEP)
-    print(f"  Started      : {cycle_start}")
-    print(f"  Finished     : {finished}")
-    print(f"  Agents run   : {len(results)}  "
-          f"({ok_count} ok, {fail_count} failed)")
-    print(f"  Total records: {total_records}")
+    print(f"  Outcome        : {outcome}")
+    print(f"  Agents run     : {len(ran)}  |  skipped: {len(skipped)}")
+    print(f"  Total new rows : {total_records}")
+    print(f"  Cycle duration : {cycle_duration:.1f}s")
     print(_SEP)
     print()
 
 
 # ---------------------------------------------------------------------------
-# Planner — decides which agents to run and states the reason
+# Summary log row builder  (rule 33 — exactly one row per cycle)
 # ---------------------------------------------------------------------------
 
-def _plan(
-    pipeline: list[Agent],
-    last_fetch: str | None,
-    unscored: int,
-) -> list[tuple[Agent, str]]:
-    decisions: list[tuple[Agent, str]] = []
+def _build_summary_notes(
+    plan: Plan,
+    ran: list[tuple[Task, AgentResult, float]],
+    outcome: str,
+) -> str:
+    parts: list[str] = [f"outcome={outcome}"]
 
-    for agent in pipeline:
-        if agent.name in ("MockFetcher", "Fetcher"):
-            decisions.append((agent, "always fetch on every cycle"))
+    for task, result, duration in ran:
+        parts.append(
+            f"{task.agent_name}:"
+            f"status={result.status},"
+            f"records={result.records_touched},"
+            f"duration={duration:.1f}s"
+        )
 
-        elif agent.name == "Scorer":
-            if unscored > 0:
-                decisions.append(
-                    (agent, f"{unscored} unscored listing(s) waiting"))
-            else:
-                decisions.append((agent, "no unscored listings — will skip"))
+    for task in plan.skipped():
+        parts.append(f"{task.agent_name}:skipped,reason={task.reason}")
 
-        elif agent.name == "GapAnalyzer":
-            decisions.append((agent, "runs after Scorer on every cycle"))
-
-        else:
-            decisions.append((agent, "registered agent"))
-
-    return decisions
+    return " | ".join(parts)
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run_cycle(config: Config) -> None:
-    """Initialise the db, read state, plan, run agents, log, and summarise."""
+def run_cycle(config: Config) -> str:
+    """Run one full cycle. Returns the outcome string for the caller.
+
+    Outcome values:
+      "complete"      — all active tasks ran successfully
+      "partial"       — at least one task failed; others continued
+      "nothing_to_do" — plan was entirely skips; this is a success
+    """
     cycle_start = _utcnow()
+    now = datetime.now(timezone.utc)
 
     print()
     print("=" * 60)
@@ -131,51 +153,109 @@ def run_cycle(config: Config) -> None:
     print("=" * 60)
     print()
 
-    # ── 1. Initialise DB ────────────────────────────────────────────────────
+    cycle_t0 = time.monotonic()
+
+    # ── 1. Initialise DB ─────────────────────────────────────────────────
     storage.init_db(config.db_path)
 
-    # ── 2. Read state ───────────────────────────────────────────────────────
-    last_fetch = storage.last_fetch_time(config.db_path)
-    unscored = storage.count_unscored(config.db_path)
-    _print_state(last_fetch, unscored)
+    # ── 2. Read state ────────────────────────────────────────────────────
+    state = read_state(config, now)
+    _print_state(state)
 
-    # ── 3. Plan ─────────────────────────────────────────────────────────────
-    pipeline = _build_pipeline(config)
-    decisions = _plan(pipeline, last_fetch, unscored)
-    _print_plan(decisions)
+    # ── 3. Build plan ────────────────────────────────────────────────────
+    plan = build_plan(state, config)
 
-    # ── 4. Run agents ───────────────────────────────────────────────────────
+    # ── 4. Print plan (rule 31 — before execution) ───────────────────────
+    print(plan.render())
+
+    # ── 5. Nothing to do? ────────────────────────────────────────────────
+    if not plan.active():
+        storage.log_cycle(
+            path=config.db_path,
+            agent="Orchestrator",
+            started_at=cycle_start,
+            finished_at=_utcnow(),
+            records_touched=0,
+            status="nothing_to_do",
+            notes=_build_summary_notes(plan, [], "nothing_to_do"),
+        )
+        print("  Nothing to do this cycle — all agents skipped.")
+        print()
+        return "nothing_to_do"
+
+    # ── 6. Resolve agents from registry ─────────────────────────────────
+    registry = _build_registry(config)
+
+    # ── 7. Execute active tasks ──────────────────────────────────────────
     print(_SEP)
     print("  AGENT RUNS")
     print(_SEP)
 
-    results: list[AgentResult] = []
-    for agent, _reason in decisions:
-        agent_start = _utcnow()
-        try:
-            result = agent.run(config, config.db_path)
-        except Exception as exc:
+    # Print skipped agents first so the full plan is visible in execution output.
+    for task in plan.skipped():
+        print(f"  ✗  {task.agent_name:<14}  SKIPPED           |  {task.reason}")
+
+    ran: list[tuple[Task, AgentResult, float]] = []
+    any_failed = False
+
+    for task in plan.active():
+        agent = registry.get(task.agent_name)
+        if agent is None:
             result = AgentResult(
-                agent=agent.name,
+                agent=task.agent_name,
                 status="failed",
                 records_touched=0,
-                notes=f"{type(exc).__name__}: {exc}",
+                notes=f"agent '{task.agent_name}' not found in registry",
             )
-        agent_finish = _utcnow()
+            duration = 0.0
+            any_failed = True
+        else:
+            t0 = time.monotonic()
+            try:
+                result = agent.run(config, config.db_path, task.stop_conditions)
+            except Exception as exc:  # noqa: BLE001 — rule 32: log and continue
+                result = AgentResult(
+                    agent=task.agent_name,
+                    status="failed",
+                    records_touched=0,
+                    notes=f"{type(exc).__name__}: {exc}",
+                )
+                any_failed = True
+            duration = time.monotonic() - t0
 
-        _print_result(result)
+            if result.status == "failed":
+                any_failed = True
 
-        # ── 5. Log every run ─────────────────────────────────────────────────
-        storage.log_cycle(
-            path=config.db_path,
-            agent=result.agent,
-            started_at=agent_start,
-            finished_at=agent_finish,
-            records_touched=result.records_touched,
-            status=result.status,
-            notes=result.notes,
-        )
-        results.append(result)
+            # Per-agent log row (kept for drill-down; summary row written below).
+            storage.log_cycle(
+                path=config.db_path,
+                agent=result.agent,
+                started_at=cycle_start,
+                finished_at=_utcnow(),
+                records_touched=result.records_touched,
+                status=result.status,
+                notes=result.notes,
+            )
 
-    # ── 6. Summary ──────────────────────────────────────────────────────────
-    _print_summary(results, cycle_start)
+        _print_result(task, result, duration)
+        ran.append((task, result, duration))
+
+    # ── 8. Determine outcome ─────────────────────────────────────────────
+    outcome = "partial" if any_failed else "complete"
+
+    # ── 9. One summary row (rule 33) ─────────────────────────────────────
+    storage.log_cycle(
+        path=config.db_path,
+        agent="Orchestrator",
+        started_at=cycle_start,
+        finished_at=_utcnow(),
+        records_touched=sum(r.records_touched for _, r, _ in ran),
+        status=outcome,
+        notes=_build_summary_notes(plan, ran, outcome),
+    )
+
+    # ── 10. Print summary ─────────────────────────────────────────────────
+    _print_summary(outcome, ran, plan.skipped(), cycle_start,
+                   time.monotonic() - cycle_t0)
+
+    return outcome

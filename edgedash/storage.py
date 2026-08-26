@@ -420,6 +420,44 @@ def get_snapshot_by_run_id(path: str, run_id: str) -> list[dict[str, Any]]:
     return result
 
 
+def last_scored_at(path: str) -> str | None:
+    """Return the most recent scored_at timestamp across all listings, or None."""
+    sql = "SELECT MAX(scored_at) FROM listings"
+    with _connect(path) as conn:
+        return conn.execute(sql).fetchone()[0]
+
+
+def last_gap_snapshot_at(path: str) -> str | None:
+    """Return the computed_at of the most recent gap snapshot run, or None."""
+    sql = "SELECT MAX(computed_at) FROM skill_gap_snapshots"
+    with _connect(path) as conn:
+        return conn.execute(sql).fetchone()[0]
+
+
+def last_cycle_verdict(path: str) -> tuple[str | None, str | None]:
+    """Return (status, started_at) of the most recent top-level cycle log row.
+
+    A top-level row is one whose agent name is 'cycle' or 'Orchestrator'.
+    Falls back to the most recent row of any agent if none found.
+    """
+    sql = """
+        SELECT status, started_at FROM cycle_log
+        WHERE  agent IN ('cycle', 'Orchestrator')
+        ORDER  BY started_at DESC
+        LIMIT  1
+    """
+    with _connect(path) as conn:
+        row = conn.execute(sql).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT status, started_at FROM cycle_log "
+                "ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+    if row is None:
+        return (None, None)
+    return (row["status"], row["started_at"])
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

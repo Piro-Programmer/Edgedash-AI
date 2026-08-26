@@ -43,8 +43,19 @@ use_mock_fetcher: false
 llm_provider: "gemini"
 llm_model: "gemini-3.5-flash"
 
+# ── SCORING ──────────────────────────────────────────────────────────────────
 # Max listings scored per cycle (rule 21 — cost/rate-limit guard).
 llm_batch_size: 25
+
+# ── SCHEDULING ───────────────────────────────────────────────────────────────
+# How many hours must pass before the Fetcher runs again.
+fetch_interval_hours: 6
+# Hard cap on pages and listings fetched in one cycle.
+fetch_max_pages: 5
+fetch_max_listings: 200
+# Hard cap on seconds the Scorer and GapAnalyzer may run.
+score_max_seconds: 300
+analyse_max_seconds: 60
 
 # Scoring weights — must sum to 1.0. Tune these without touching code.
 # skill_match:   fraction of required skills present in my_skills profile.

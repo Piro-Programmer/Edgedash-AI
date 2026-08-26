@@ -12,7 +12,7 @@ Per rule 21: batch capped at config.llm_batch_size.
 
 from __future__ import annotations
 
-import json
+import time
 from datetime import datetime, timezone
 
 import edgedash.storage as storage
@@ -28,8 +28,28 @@ _SUSPECT_SPREAD_THRESHOLD = 10   # spread < this → flag as suspect (rule 20)
 class Scorer:
     name: str = "Scorer"
 
-    def run(self, config: Config, storage_path: str) -> AgentResult:
-        batch = storage.get_unscored_listings(storage_path, config.llm_batch_size)
+    def run(
+        self,
+        config: Config,
+        storage_path: str,
+        stop_conditions: "StopConditions | None" = None,
+    ) -> AgentResult:
+        from edgedash.planning import StopConditions as SC
+
+        # Resolve limits: stop_conditions take priority over config defaults.
+        batch_size = (
+            stop_conditions.max_items
+            if stop_conditions and stop_conditions.max_items is not None
+            else config.llm_batch_size
+        )
+        max_seconds = (
+            stop_conditions.max_seconds
+            if stop_conditions and stop_conditions.max_seconds is not None
+            else config.score_max_seconds
+        )
+        deadline = time.monotonic() + max_seconds if max_seconds else None
+
+        batch = storage.get_unscored_listings(storage_path, batch_size)
 
         if not batch:
             return AgentResult(
@@ -42,8 +62,13 @@ class Scorer:
         scored_count = 0
         failed_count = 0
         scores: list[int] = []
+        timeout_note: str = ""
 
         for i, listing in enumerate(batch, start=1):
+            # Respect max_seconds stop condition.
+            if deadline and time.monotonic() > deadline:
+                timeout_note = f" · stopped: max_seconds={max_seconds} reached"
+                break
             listing_id: str = listing["id"]
             title: str = listing.get("title") or listing_id[:16]
             print(f"  [Scorer] {i}/{len(batch)} — {title[:60]}", flush=True)
@@ -74,7 +99,7 @@ class Scorer:
                     notes=f"{title}: {type(exc).__name__}: {exc}",
                 )
 
-        notes = _build_notes(scores, failed_count)
+        notes = _build_notes(scores, failed_count) + timeout_note
         dist_status = _distribution_status(scores)
 
         storage.log_cycle(

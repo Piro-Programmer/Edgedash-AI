@@ -66,7 +66,13 @@ def _normalised_to_storage(row: dict) -> dict:
 class Fetcher:
     name: str = "Fetcher"
 
-    def run(self, config: Config, storage_path: str) -> AgentResult:
+    def run(
+        self,
+        config: Config,
+        storage_path: str,
+        stop_conditions: "StopConditions | None" = None,
+    ) -> AgentResult:
+        from edgedash.planning import StopConditions as SC
         _ensure_sources_loaded()
 
         enabled = config.sources
@@ -78,9 +84,31 @@ class Fetcher:
                 notes="No sources listed in config.sources.",
             )
 
+        # Respect stop_conditions.max_items if given, else fall back to config.
+        max_listings = (
+            stop_conditions.max_items
+            if stop_conditions and stop_conditions.max_items is not None
+            else config.fetch_max_listings
+        )
+        max_pages = (
+            stop_conditions.max_pages
+            if stop_conditions and stop_conditions.max_pages is not None
+            else config.fetch_max_pages
+        )
+
         total_new = 0
         note_parts: list[str] = []
         any_success = False
+
+        # Build a config copy with stop_condition limits applied,
+        # so sources read them from config without any interface change.
+        from dataclasses import replace as _replace
+        effective_config = _replace(
+            config,
+            fetch_max_pages=max_pages,
+            fetch_max_listings=max_listings,
+        ) if (max_pages != config.fetch_max_pages
+              or max_listings != config.fetch_max_listings) else config
 
         for source_name in enabled:
             source_cls = SOURCES.get(source_name)
@@ -92,7 +120,13 @@ class Fetcher:
 
             started_at = datetime.now(timezone.utc).isoformat()
             try:
-                rows = source_cls().fetch(config)
+                rows = source_cls().fetch(effective_config)
+                # Respect max_listings cap across all sources combined.
+                remaining = max_listings - total_new
+                if remaining <= 0:
+                    note_parts.append(f"{source_name}: skipped (max_listings reached)")
+                    break
+                rows = rows[:remaining]
                 storage_rows = [_normalised_to_storage(r) for r in rows]
                 new_count = storage.upsert_listings(storage_path, storage_rows)
                 total_new += new_count

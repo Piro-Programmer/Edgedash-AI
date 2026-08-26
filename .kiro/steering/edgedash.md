@@ -164,3 +164,26 @@ Trigger (scheduled)
 ### 27 — Report sample size alongside every aggregate
 - A gap computed from 3 listings and a gap computed from 90 listings must never be presented as equally reliable.
 - Sample size is always shown next to the aggregate figure.
+
+## Orchestration
+
+### 28 — State-driven planning, not fixed sequencing
+- The Orchestrator reads system state and decides which agents to run.
+- It never runs a fixed sequence. Skipping an agent because there is no work for it is a successful outcome, not a failure.
+
+### 29 — Explicit goals and stop conditions per delegation
+- Every delegation carries an explicit goal and an explicit stop condition (max items, max duration).
+- A sub-agent never decides its own limits — the Orchestrator sets them.
+
+### 30 — The Orchestrator never does an agent's work
+- The Orchestrator reads state, delegates, collects results, and logs. Nothing else.
+- No fetching, scoring, or analysis logic belongs in the Orchestrator.
+
+### 31 — Plan before execute
+- The Orchestrator prints and logs its plan before executing it: which agents will run, which are skipped, and the state value that caused each decision.
+
+### 32 — One agent failing does not stop the cycle
+- Log the failure, continue with the remaining plan, and mark the cycle partial.
+
+### 33 — One summary row per cycle
+- Every cycle writes exactly one summary row: what ran, what was skipped, why, duration per agent, and the outcome.

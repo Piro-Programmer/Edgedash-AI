@@ -33,19 +33,19 @@ def test_perfect_match():
         "seniority": "mid",
         "remote_ok": True
     }
-    
+
     res = score_listing(listing, facts, config)
     assert res["score"] == 100
     assert res["components"]["skill_match"] == 1.0
     assert res["components"]["seniority_fit"] == 1.0
     assert res["components"]["location_fit"] == 1.0
-    assert res["components"]["recency"] == 1.0
+    assert res["components"]["recency"] >= 0.999   # posted_at is "now" — floating point, not exactly 1.0
 
 
 def test_zero_match():
     config = get_base_config()
     config.target_seniority = "junior"
-    
+
     listing = {
         "location": "Tokyo",
         "posted_at": "2020-01-01T00:00:00Z"
@@ -56,13 +56,13 @@ def test_zero_match():
         "seniority": "lead",
         "remote_ok": False
     }
-    
+
     res = score_listing(listing, facts, config)
     assert res["components"]["skill_match"] == 0.0
     assert res["components"]["seniority_fit"] == 0.0
     assert res["components"]["location_fit"] == 0.1
     assert res["components"]["recency"] == 0.0
-    
+
     assert res["score"] == 2  # 0.1 * 0.15 * 100 = 1.5, rounded to 2
 
 
@@ -88,13 +88,13 @@ def test_null_posted_at():
 
 def test_null_remote_ok():
     config = get_base_config()
-    
+
     # Location doesn't match and remote is null -> 0.5
     listing_unknown = {"location": "Tokyo"}
     facts_unknown = {"remote_ok": None}
     res1 = score_listing(listing_unknown, facts_unknown, config)
     assert res1["components"]["location_fit"] == 0.5
-    
+
     # Location matches but remote is null -> 1.0
     listing_match = {"location": "London"}
     res2 = score_listing(listing_match, facts_unknown, config)

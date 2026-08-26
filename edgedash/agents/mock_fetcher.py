@@ -205,7 +205,13 @@ def _build_rows(config: Config) -> list[dict]:
 class MockFetcher:
     name: str = "MockFetcher"
 
-    def run(self, config: Config, storage_path: str) -> AgentResult:
+    def run(
+        self,
+        config: Config,
+        storage_path: str,
+        stop_conditions: "StopConditions | None" = None,
+    ) -> AgentResult:
+        # stop_conditions are accepted but not applied — mock data is always small.
         rows = _build_rows(config)
         new_count = storage.upsert_listings(storage_path, rows)
         notes = (
