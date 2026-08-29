@@ -186,7 +186,7 @@ class _GeminiProvider:
         self._model = model
 
     def call(self, prompt: str) -> str:
-        backoff = 2.0
+        backoff = 10.0  # fallback backoff
         for attempt in range(3):
             try:
                 # Use chats API — avoids the AFC warning and is the
@@ -198,8 +198,14 @@ class _GeminiProvider:
                 msg = str(exc).lower()
                 is_quota = "429" in msg or "quota" in msg or "resource_exhausted" in msg
                 if is_quota and attempt < 2:
-                    time.sleep(backoff)
-                    backoff *= 2
+                    m = re.search(r"retry in (\d+(?:\.\d+)?)s", msg)
+                    if m:
+                        delay = float(m.group(1)) + 1.0
+                    else:
+                        delay = backoff
+                        backoff *= 2
+                    print(f"  [LLM] Rate limit hit. Sleeping {delay:.1f}s before retry...", flush=True)
+                    time.sleep(delay)
                     continue
                 raise LLMError(f"Gemini API error: {exc}") from exc
         raise LLMError("Gemini quota exhausted after 3 backoff attempts.")

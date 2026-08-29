@@ -13,6 +13,7 @@ from edgedash.agents.fetcher import Fetcher
 from edgedash.agents.gap_analyzer import GapAnalyzer
 from edgedash.agents.mock_fetcher import MockFetcher
 from edgedash.agents.scorer import Scorer
+from edgedash.agents.verifier import Verifier
 from edgedash.config import Config
 
 
@@ -25,6 +26,6 @@ def make_fetcher(config: Config) -> Agent:
 
 __all__ = [
     "Agent", "AgentResult",
-    "Fetcher", "MockFetcher", "Scorer", "GapAnalyzer",
+    "Fetcher", "MockFetcher", "Scorer", "GapAnalyzer", "Verifier",
     "make_fetcher",
 ]

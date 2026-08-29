@@ -88,9 +88,22 @@ Output must be a JSON object with EXACTLY these five keys — no others:
 {description}
 --- END ---"""
 
+_STRICT_SUFFIX = """
 
-def _build_prompt(description: str) -> str:
-    return _PROMPT_TEMPLATE.format(description=description.strip())
+CRITICAL: Be extremely strict about what counts as a required skill.
+- Only list skills that are explicitly and unambiguously stated as required.
+- Do NOT include skills that are merely implied, contextual, or "nice to have".
+- If the listing mentions a technology only in passing or as part of a project
+  description, do NOT add it to required_skills.
+- A shorter, more precise list is always preferred over a longer, speculative one.
+"""
+
+
+def _build_prompt(description: str, *, strict: bool = False) -> str:
+    prompt = _PROMPT_TEMPLATE.format(description=description.strip())
+    if strict:
+        prompt += _STRICT_SUFFIX
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -117,13 +130,15 @@ def _normalise(result: dict) -> dict:
 # Public function
 # ---------------------------------------------------------------------------
 
-def extract(listing: dict, db_path: str) -> dict:
+def extract(listing: dict, db_path: str, *, strict: bool = False) -> dict:
     """Extract structured facts from *listing* and return a validated dict.
 
     Cache behaviour (rule 18):
       - Computes a SHA-256 hash of the raw description text.
       - On a cache hit: returns the stored result immediately, no model call.
       - On a cache miss: calls the model, normalises, stores, then returns.
+      - When strict=True (verification retry), the cache is BYPASSED so the
+        model re-extracts with a stricter prompt.
 
     On model failure the LLMError propagates to the caller (the Scorer),
     which logs it as a per-listing failure per rule 17 — it must not crash
@@ -133,6 +148,7 @@ def extract(listing: dict, db_path: str) -> dict:
     ----------
     listing:  A dict with at least a "description" key (may be None/empty).
     db_path:  Path to the SQLite database, forwarded to storage functions.
+    strict:   If True, use a stricter extraction prompt and bypass cache.
     """
     description: str = listing.get("description") or ""
 
@@ -142,13 +158,14 @@ def extract(listing: dict, db_path: str) -> dict:
 
     desc_hash = _description_hash(description)
 
-    # --- Cache check ---
-    cached = storage.get_extraction_cache(db_path, desc_hash)
-    if cached is not None:
-        return cached
+    # --- Cache check (bypassed in strict mode) ---
+    if not strict:
+        cached = storage.get_extraction_cache(db_path, desc_hash)
+        if cached is not None:
+            return cached
 
     # --- Model call ---
-    prompt = _build_prompt(description)
+    prompt = _build_prompt(description, strict=strict)
     result = complete_json(prompt, EXTRACTION_SCHEMA, max_retries=1)
 
     # Normalise skill names to lowercase before caching (rule: consistent matching).

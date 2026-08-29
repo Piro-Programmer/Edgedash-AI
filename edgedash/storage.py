@@ -458,9 +458,43 @@ def last_cycle_verdict(path: str) -> tuple[str | None, str | None]:
     return (row["status"], row["started_at"])
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+def get_latest_passing_cycle(path: str) -> dict[str, Any] | None:
+    """Return the most recent Orchestrator cycle_log row with a passing verdict.
+
+    A passing cycle is one whose status is NOT 'degraded'.
+    Returns None if no such row exists.  Next week's dashboard reads only this
+    row (rule 38).
+    """
+    sql = """
+        SELECT * FROM cycle_log
+        WHERE  agent IN ('cycle', 'Orchestrator')
+        AND    status != 'degraded'
+        ORDER  BY started_at DESC
+        LIMIT  1
+    """
+    with _connect(path) as conn:
+        row = conn.execute(sql).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def get_recent_cycles(path: str, limit: int = 30) -> list[dict[str, Any]]:
+    """Return the most recent *limit* cycle_log rows, newest first.
+
+    Includes ALL statuses (ok, failed, degraded, etc.) — the activity log
+    panel intentionally shows failures because they are the point.
+    Only returns top-level cycle rows.
+    """
+    sql = """
+        SELECT * FROM cycle_log
+        WHERE agent IN ('cycle', 'Orchestrator')
+        ORDER  BY started_at DESC
+        LIMIT  ?
+    """
+    with _connect(path) as conn:
+        rows = conn.execute(sql, (limit,)).fetchall()
+    return [dict(r) for r in rows]
 
 def _row_count(conn: sqlite3.Connection, table: str) -> int:
     return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]

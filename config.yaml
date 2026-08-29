@@ -45,7 +45,7 @@ llm_model: "gemini-3.5-flash"
 
 # ── SCORING ──────────────────────────────────────────────────────────────────
 # Max listings scored per cycle (rule 21 — cost/rate-limit guard).
-llm_batch_size: 25
+llm_batch_size: 1
 
 # ── SCHEDULING ───────────────────────────────────────────────────────────────
 # How many hours must pass before the Fetcher runs again.
@@ -56,6 +56,15 @@ fetch_max_listings: 200
 # Hard cap on seconds the Scorer and GapAnalyzer may run.
 score_max_seconds: 300
 analyse_max_seconds: 60
+
+# ── VERIFICATION ─────────────────────────────────────────────────────────────
+# Verification checks — pure functions that catch failure modes.
+min_score_spread: 10              # Catches score inflation/compression
+min_score_stdev: 5.0              # Catches lack of score variance
+max_empty_extraction_pct: 20.0    # Catches broken extractors returning empty lists
+max_skills_per_listing: 20        # Catches extractors returning full sentences instead of bullet points
+min_gap_sample: 3                 # Catches ranking a rumour
+max_data_age_days: 3              # Catches stale data
 
 # Scoring weights — must sum to 1.0. Tune these without touching code.
 # skill_match:   fraction of required skills present in my_skills profile.
