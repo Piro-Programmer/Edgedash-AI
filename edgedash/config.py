@@ -47,6 +47,12 @@ _DEFAULTS: dict = {
     "fetch_max_listings": 200,
     "score_max_seconds": 300,
     "analyse_max_seconds": 60,
+    "min_score_spread": 10,
+    "min_score_stdev": 5.0,
+    "max_empty_extraction_pct": 20.0,
+    "max_skills_per_listing": 20,
+    "min_gap_sample": 3,
+    "max_data_age_days": 3,
 }
 
 _CONFIG_FILENAME = "config.yaml"
@@ -78,6 +84,12 @@ class Config:
     fetch_max_listings: int = 200
     score_max_seconds: int = 300
     analyse_max_seconds: int = 60
+    min_score_spread: int = 10
+    min_score_stdev: float = 5.0
+    max_empty_extraction_pct: float = 20.0
+    max_skills_per_listing: int = 20
+    min_gap_sample: int = 3
+    max_data_age_days: int = 3
 
 
 def load_config(repo_root: Path | None = None) -> Config:
@@ -127,6 +139,12 @@ def load_config(repo_root: Path | None = None) -> Config:
         fetch_max_listings=_as_int(data["fetch_max_listings"], "fetch_max_listings"),
         score_max_seconds=_as_int(data["score_max_seconds"], "score_max_seconds"),
         analyse_max_seconds=_as_int(data["analyse_max_seconds"], "analyse_max_seconds"),
+        min_score_spread=_as_int(data["min_score_spread"], "min_score_spread"),
+        min_score_stdev=float(data["min_score_stdev"]),
+        max_empty_extraction_pct=float(data["max_empty_extraction_pct"]),
+        max_skills_per_listing=_as_int(data["max_skills_per_listing"], "max_skills_per_listing"),
+        min_gap_sample=_as_int(data["min_gap_sample"], "min_gap_sample"),
+        max_data_age_days=_as_int(data["max_data_age_days"], "max_data_age_days"),
     )
 
 

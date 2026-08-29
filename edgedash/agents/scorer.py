@@ -49,6 +49,13 @@ class Scorer:
         )
         deadline = time.monotonic() + max_seconds if max_seconds else None
 
+        # strict_scoring: verification retry flag — widen distribution.
+        strict = (
+            stop_conditions.strict_scoring
+            if stop_conditions is not None
+            else False
+        )
+
         batch = storage.get_unscored_listings(storage_path, batch_size)
 
         if not batch:
@@ -73,7 +80,7 @@ class Scorer:
             title: str = listing.get("title") or listing_id[:16]
             print(f"  [Scorer] {i}/{len(batch)} — {title[:60]}", flush=True)
             try:
-                facts = extract(listing, storage_path)
+                facts = extract(listing, storage_path, strict=strict)
                 result = score_listing(listing, facts, config)
 
                 storage.write_score(
@@ -98,6 +105,10 @@ class Scorer:
                     status="failed",
                     notes=f"{title}: {type(exc).__name__}: {exc}",
                 )
+                msg = str(exc).lower()
+                if "quota" in msg or "429" in msg or "resource_exhausted" in msg:
+                    timeout_note = " · stopped: rate limit / quota exceeded"
+                    break
 
         notes = _build_notes(scores, failed_count) + timeout_note
         dist_status = _distribution_status(scores)

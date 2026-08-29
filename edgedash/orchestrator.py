@@ -28,7 +28,7 @@ from typing import Any
 import edgedash.storage as storage
 from edgedash.agents.base import AgentResult
 from edgedash.config import Config
-from edgedash.planning import Plan, Task, build_plan
+from edgedash.planning import Plan, StopConditions, Task, build_plan
 from edgedash.state import read_state
 
 _SEP = "─" * 60
@@ -39,12 +39,13 @@ _SEP = "─" * 60
 # ---------------------------------------------------------------------------
 
 def _build_registry(config: Config) -> dict[str, Any]:
-    from edgedash.agents import make_fetcher, Scorer, GapAnalyzer
+    from edgedash.agents import make_fetcher, Scorer, GapAnalyzer, Verifier
     return {
         "Fetcher":     make_fetcher(config),
         "MockFetcher": make_fetcher(config),
         "Scorer":      Scorer(),
         "GapAnalyzer": GapAnalyzer(),
+        "Verifier":    Verifier(),
     }
 
 
@@ -131,6 +132,52 @@ def _build_summary_notes(
 
 
 # ---------------------------------------------------------------------------
+# Task execution helper (extracted for reuse by the retry loop)
+# ---------------------------------------------------------------------------
+
+def _execute_task(
+    task: Task,
+    registry: dict[str, Any],
+    config: Config,
+    cycle_start: str,
+) -> tuple[AgentResult, float]:
+    """Run a single task and return (result, duration_seconds)."""
+    agent = registry.get(task.agent_name)
+    if agent is None:
+        return AgentResult(
+            agent=task.agent_name,
+            status="failed",
+            records_touched=0,
+            notes=f"agent '{task.agent_name}' not found in registry",
+        ), 0.0
+
+    t0 = time.monotonic()
+    try:
+        result = agent.run(config, config.db_path, task.stop_conditions)
+    except Exception as exc:  # noqa: BLE001 — rule 32: log and continue
+        result = AgentResult(
+            agent=task.agent_name,
+            status="failed",
+            records_touched=0,
+            notes=f"{type(exc).__name__}: {exc}",
+        )
+    duration = time.monotonic() - t0
+
+    # Per-agent log row (kept for drill-down; summary row written below).
+    storage.log_cycle(
+        path=config.db_path,
+        agent=result.agent,
+        started_at=cycle_start,
+        finished_at=_utcnow(),
+        records_touched=result.records_touched,
+        status=result.status,
+        notes=result.notes,
+    )
+
+    return result, duration
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -138,8 +185,9 @@ def run_cycle(config: Config) -> str:
     """Run one full cycle. Returns the outcome string for the caller.
 
     Outcome values:
-      "complete"      — all active tasks ran successfully
+      "complete"      — all active tasks ran successfully and verification passed
       "partial"       — at least one task failed; others continued
+      "degraded"      — verification failed even after one retry (rule 36)
       "nothing_to_do" — plan was entirely skips; this is a success
     """
     cycle_start = _utcnow()
@@ -197,53 +245,97 @@ def run_cycle(config: Config) -> str:
 
     ran: list[tuple[Task, AgentResult, float]] = []
     any_failed = False
+    retry_count = 0
+    verdict_notes = "no verification"
 
     for task in plan.active():
-        agent = registry.get(task.agent_name)
-        if agent is None:
-            result = AgentResult(
-                agent=task.agent_name,
-                status="failed",
-                records_touched=0,
-                notes=f"agent '{task.agent_name}' not found in registry",
-            )
-            duration = 0.0
+        result, duration = _execute_task(task, registry, config, cycle_start)
+
+        if result.status == "failed":
             any_failed = True
-        else:
-            t0 = time.monotonic()
-            try:
-                result = agent.run(config, config.db_path, task.stop_conditions)
-            except Exception as exc:  # noqa: BLE001 — rule 32: log and continue
-                result = AgentResult(
-                    agent=task.agent_name,
-                    status="failed",
-                    records_touched=0,
-                    notes=f"{type(exc).__name__}: {exc}",
-                )
-                any_failed = True
-            duration = time.monotonic() - t0
-
-            if result.status == "failed":
-                any_failed = True
-
-            # Per-agent log row (kept for drill-down; summary row written below).
-            storage.log_cycle(
-                path=config.db_path,
-                agent=result.agent,
-                started_at=cycle_start,
-                finished_at=_utcnow(),
-                records_touched=result.records_touched,
-                status=result.status,
-                notes=result.notes,
-            )
 
         _print_result(task, result, duration)
         ran.append((task, result, duration))
 
-    # ── 8. Determine outcome ─────────────────────────────────────────────
-    outcome = "partial" if any_failed else "complete"
+    # ── 8. Verification & Retry (rule 36) ────────────────────────────────
+    ran_agents = {t.agent_name for t, _, _ in ran}
+    needs_verification = "Scorer" in ran_agents or "GapAnalyzer" in ran_agents
+
+    if needs_verification:
+        print()
+        print(_SEP)
+        print("  VERIFICATION")
+        print(_SEP)
+
+        v_task = Task(
+            agent_name="Verifier",
+            goal="verify cycle integrity",
+            stop_conditions=StopConditions(),
+            skipped=False,
+            reason="verification",
+        )
+        v_res, v_dur = _execute_task(v_task, registry, config, cycle_start)
+        _print_result(v_task, v_res, v_dur)
+        ran.append((v_task, v_res, v_dur))
+        verdict_notes = v_res.notes or ""
+
+        if v_res.status == "failed":
+            # ── Determine which agent to retry ───────────────────────────
+            notes_lower = verdict_notes.lower()
+            if "score_spread" in notes_lower or "extraction_sanity" in notes_lower:
+                retry_agent = "Scorer"
+            elif "gap_sample_size" in notes_lower:
+                retry_agent = "GapAnalyzer"
+            elif "freshness" in notes_lower:
+                retry_agent = "Fetcher"
+            else:
+                retry_agent = "Scorer"  # default to Scorer
+
+            strict = retry_agent == "Scorer"
+            retry_count = 1
+
+            print()
+            print(f"  ⟳  Verification failed. Retrying {retry_agent}"
+                  f"{' (strict_scoring=True)' if strict else ''} …")
+            print()
+
+            r_task = Task(
+                agent_name=retry_agent,
+                goal=f"retry after verification failure ({verdict_notes[:80]})",
+                stop_conditions=StopConditions(
+                    max_items=config.llm_batch_size,
+                    max_seconds=config.score_max_seconds,
+                    strict_scoring=strict,
+                ),
+                skipped=False,
+                reason="verification_retry",
+            )
+            r_res, r_dur = _execute_task(r_task, registry, config, cycle_start)
+            _print_result(r_task, r_res, r_dur)
+            ran.append((r_task, r_res, r_dur))
+
+            # ── Verify once more ─────────────────────────────────────────
+            v2_res, v2_dur = _execute_task(v_task, registry, config, cycle_start)
+            _print_result(v_task, v2_res, v2_dur)
+            ran.append((v_task, v2_res, v2_dur))
+            verdict_notes = v2_res.notes or ""
+
+            if v2_res.status == "failed":
+                any_failed = True
+                outcome = "degraded"
+                print()
+                print("  ⚠  Verification failed after retry. Cycle degraded. Stopping.")
+            else:
+                outcome = "partial" if any_failed else "complete"
+        else:
+            outcome = "partial" if any_failed else "complete"
+    else:
+        outcome = "partial" if any_failed else "complete"
 
     # ── 9. One summary row (rule 33) ─────────────────────────────────────
+    summary = _build_summary_notes(plan, ran, outcome)
+    summary += f" | retries={retry_count} | {verdict_notes}"
+
     storage.log_cycle(
         path=config.db_path,
         agent="Orchestrator",
@@ -251,7 +343,7 @@ def run_cycle(config: Config) -> str:
         finished_at=_utcnow(),
         records_touched=sum(r.records_touched for _, r, _ in ran),
         status=outcome,
-        notes=_build_summary_notes(plan, ran, outcome),
+        notes=summary,
     )
 
     # ── 10. Print summary ─────────────────────────────────────────────────

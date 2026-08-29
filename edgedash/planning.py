@@ -27,6 +27,7 @@ class StopConditions:
     max_items: int | None = None
     max_seconds: int | None = None
     max_pages: int | None = None
+    strict_scoring: bool = False   # retry flag: widen score distribution
 
     def render(self) -> str:
         parts = []
@@ -36,6 +37,8 @@ class StopConditions:
             parts.append(f"max_pages={self.max_pages}")
         if self.max_seconds is not None:
             parts.append(f"max_seconds={self.max_seconds}")
+        if self.strict_scoring:
+            parts.append("strict_scoring=True")
         return ", ".join(parts) if parts else "—"
 
 
