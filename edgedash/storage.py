@@ -12,12 +12,18 @@ import json
 import os
 import re
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Generator, Any
 from dotenv import load_dotenv
 
-load_dotenv()
-_POSTGRES_URL = os.environ.get("DATABASE_URL")
+# Load the repo's own .env explicitly. A bare load_dotenv() walks up from the
+# caller's directory and can silently pick up an unrelated parent project's
+# .env — which is how a test run ends up pointed at production Postgres.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+
+# An empty string counts as "set" here, which is how tests opt out of Postgres.
+_POSTGRES_URL = os.environ.get("DATABASE_URL") or None
 
 if _POSTGRES_URL:
     print("[storage] backend: postgres")
@@ -124,22 +130,26 @@ class _CursorWrapper:
         self._cursor = cursor
         self.is_postgres = is_postgres
 
-    def _translate_sql(self, sql: str) -> str:
+    def _translate_sql(self, sql: str, params: Any = None) -> str:
+        """Rewrite SQLite placeholders to psycopg2 ones.
+
+        The placeholder style is chosen from the *params* type rather than by
+        running both substitutions blindly: a query never mixes the two, and
+        rewriting ``:name`` inside a query that uses ``?`` would corrupt any
+        literal colon (e.g. a ``::`` cast or an ISO timestamp).
+        """
         if not self.is_postgres:
             return sql
-            
-        # Translate placeholders
-        sql = re.sub(r'\?(?![\w:])', '%s', sql)
-        sql = re.sub(r':(\w+)', r'%(\1)s', sql)
-        
-        # Translate date arithmetic
-        sql = sql.replace("datetime('now', '-' || ? || ' days')", "NOW() - CAST(%s || ' days' AS INTERVAL)")
-        sql = sql.replace("datetime('now', '-' || %s || ' days')", "NOW() - CAST(%s || ' days' AS INTERVAL)")
-        
-        return sql
+
+        if isinstance(params, dict):
+            # Named style:  :name  ->  %(name)s   (already-native %(name)s is left alone)
+            return re.sub(r'(?<![:\w]):(\w+)', r'%(\1)s', sql)
+
+        # Positional style:  ?  ->  %s
+        return re.sub(r'\?(?![\w:])', '%s', sql)
 
     def execute(self, sql: str, params: Any = None):
-        sql = self._translate_sql(sql)
+        sql = self._translate_sql(sql, params)
         if params is not None:
             self._cursor.execute(sql, params)
         else:
@@ -147,7 +157,8 @@ class _CursorWrapper:
         return self
 
     def executemany(self, sql: str, params: list[Any]):
-        sql = self._translate_sql(sql)
+        sample = params[0] if params else None
+        sql = self._translate_sql(sql, sample)
         self._cursor.executemany(sql, params)
         return self
 
@@ -159,6 +170,19 @@ class _CursorWrapper:
 
     def fetchall(self):
         return [dict(r) for r in self._cursor.fetchall()]
+
+    def fetchval(self, default: Any = None) -> Any:
+        """Return the first column of the first row, or *default*.
+
+        Both backends hand back mappings here (sqlite3.Row and psycopg2's
+        RealDictCursor), so positional indexing such as ``fetchone()[0]``
+        raises KeyError. Aggregate queries must go through this helper.
+        """
+        row = self.fetchone()
+        if not row:
+            return default
+        values = list(row.values())
+        return values[0] if values else default
 
 
 @contextmanager
@@ -254,7 +278,24 @@ def upsert_listings(path: str, rows: list[dict[str, Any]]) -> int:
         entry.setdefault("fetched_at", now)
         entry.setdefault("fit_score", None)
         entry.setdefault("fit_reason", None)
+
+        # title/company/location/url are NOT NULL in the schema, but sources
+        # are required to emit None for missing values. One such row used to
+        # abort the whole executemany and lose the entire fetch batch.
+        if not entry.get("url"):
+            continue
+        for col, fallback in (
+            ("title", "Untitled"),
+            ("company", "Unknown"),
+            ("location", "Unspecified"),
+        ):
+            if not entry.get(col):
+                entry[col] = fallback
+
         prepped.append(entry)
+
+    if not prepped:
+        return 0
 
     with _connect(path) as conn:
         before = _row_count(conn, "listings")
@@ -267,15 +308,13 @@ def upsert_listings(path: str, rows: list[dict[str, Any]]) -> int:
 def count_unscored(path: str) -> int:
     sql = "SELECT COUNT(*) FROM listings WHERE fit_score IS NULL"
     with _connect(path) as conn:
-        res = conn.execute(sql).fetchone()
-        return list(res.values())[0] if res else 0
+        return conn.execute(sql).fetchval(0)
 
 
 def last_fetch_time(path: str) -> str | None:
     sql = "SELECT MAX(fetched_at) FROM listings"
     with _connect(path) as conn:
-        res = conn.execute(sql).fetchone()
-        return list(res.values())[0] if res else None
+        return conn.execute(sql).fetchval()
 
 
 def log_cycle(
@@ -311,7 +350,14 @@ def get_listings(
         """
         params: tuple = (min_score, limit)
     else:
-        sql = "SELECT * FROM listings ORDER BY fit_score DESC LIMIT ?"
+        # Postgres sorts NULLs FIRST on DESC while SQLite sorts them last, so
+        # an unqualified ORDER BY would fill the whole limit with unscored
+        # rows on the hosted backend. The IS NULL key makes it portable.
+        sql = (
+            "SELECT * FROM listings "
+            "ORDER BY (fit_score IS NULL), fit_score DESC "
+            "LIMIT ?"
+        )
         params = (limit,)
 
     with _connect(path) as conn:
@@ -320,15 +366,19 @@ def get_listings(
 
 
 def get_companies_hiring(path: str, days: int) -> list[dict[str, Any]]:
+    # posted_at is stored as an ISO-8601 UTC string, so the cutoff is computed
+    # in Python and compared lexicographically. SQLite's datetime('now', ...)
+    # has no Postgres equivalent, and casting TEXT to timestamptz there fails
+    # with "operator does not exist: text >= timestamp with time zone".
     sql = """
         SELECT company, COUNT(*) as count
         FROM listings
-        WHERE posted_at >= datetime('now', '-' || ? || ' days')
+        WHERE posted_at >= ?
         GROUP BY company
         ORDER BY count DESC
     """
     with _connect(path) as conn:
-        rows = conn.execute(sql, (days,)).fetchall()
+        rows = conn.execute(sql, (_days_ago_iso(days),)).fetchall()
     return rows
 
 
@@ -507,7 +557,7 @@ def get_latest_snapshot(path: str) -> list[dict[str, Any]]:
     result = []
     for r in rows:
         d = dict(r)
-        d["example_ids"] = json.loads(d["example_ids"])
+        d["example_ids"] = _decode_example_ids(d["example_ids"])
         result.append(d)
     return result
 
@@ -536,7 +586,7 @@ def get_snapshot_by_run_id(path: str, run_id: str) -> list[dict[str, Any]]:
     result = []
     for r in rows:
         d = dict(r)
-        d["example_ids"] = json.loads(d["example_ids"])
+        d["example_ids"] = _decode_example_ids(d["example_ids"])
         result.append(d)
     return result
 
@@ -544,15 +594,13 @@ def get_snapshot_by_run_id(path: str, run_id: str) -> list[dict[str, Any]]:
 def last_scored_at(path: str) -> str | None:
     sql = "SELECT MAX(scored_at) FROM listings"
     with _connect(path) as conn:
-        res = conn.execute(sql).fetchone()
-        return list(res.values())[0] if res else None
+        return conn.execute(sql).fetchval()
 
 
 def last_gap_snapshot_at(path: str) -> str | None:
     sql = "SELECT MAX(computed_at) FROM skill_gap_snapshots"
     with _connect(path) as conn:
-        res = conn.execute(sql).fetchone()
-        return list(res.values())[0] if res else None
+        return conn.execute(sql).fetchval()
 
 
 def last_cycle_verdict(path: str) -> tuple[str | None, str | None]:
@@ -575,16 +623,26 @@ def last_cycle_verdict(path: str) -> tuple[str | None, str | None]:
     return (row["status"], row["started_at"])
 
 
+# Orchestrator outcomes that count as a verified cycle (rule 38). 'partial'
+# and 'degraded' are excluded: a cycle where an agent failed, or where
+# verification failed after a retry, is not something data panels may trust.
+PASSING_STATUSES: tuple[str, ...] = ("complete", "nothing_to_do")
+
+# Orchestrator outcomes that must raise the stale-data banner.
+FAILING_STATUSES: tuple[str, ...] = ("degraded", "partial", "failed")
+
+
 def get_latest_passing_cycle(path: str) -> dict[str, Any] | None:
-    sql = """
+    placeholders = ",".join("?" * len(PASSING_STATUSES))
+    sql = f"""
         SELECT * FROM cycle_log
         WHERE  agent IN ('cycle', 'Orchestrator')
-        AND    status != 'degraded'
+        AND    status IN ({placeholders})
         ORDER  BY started_at DESC
         LIMIT  1
     """
     with _connect(path) as conn:
-        row = conn.execute(sql).fetchone()
+        row = conn.execute(sql, PASSING_STATUSES).fetchone()
     if row is None:
         return None
     return dict(row)
@@ -628,8 +686,8 @@ def get_gap_detail(path: str, skill: str) -> list[dict[str, Any]]:
         snap = conn.execute(sql_snap, (run_id, skill)).fetchone()
         if not snap or not snap["example_ids"]:
             return []
-            
-        ids = [i.strip() for i in snap["example_ids"].split(",") if i.strip()]
+
+        ids = _decode_example_ids(snap["example_ids"])
         if not ids:
             return []
         placeholders = ",".join("?" * len(ids))
@@ -645,14 +703,15 @@ def get_gap_detail(path: str, skill: str) -> list[dict[str, Any]]:
 
 
 def get_trend(path: str, weeks: int) -> list[dict[str, Any]]:
+    # See get_companies_hiring — cutoff computed in Python for portability.
     sql = """
         SELECT skill, computed_at, opportunity_cost
         FROM skill_gap_snapshots
-        WHERE computed_at >= datetime('now', '-' || ? || ' days')
+        WHERE computed_at >= ?
         ORDER BY computed_at ASC
     """
     with _connect(path) as conn:
-        rows = conn.execute(sql, (weeks * 7,)).fetchall()
+        rows = conn.execute(sql, (_days_ago_iso(weeks * 7),)).fetchall()
     return rows
 
 
@@ -666,8 +725,11 @@ def get_skill_demand(path: str, skill: str) -> dict[str, int]:
         for row in rows:
             try:
                 data = json.loads(row["result_json"])
-                reqs = [s.lower() for s in data.get("required_skills", [])]
-                nices = [s.lower() for s in data.get("nice_to_have_skills", [])]
+                reqs = [s.lower() for s in data.get("required_skills") or []]
+                # The extractor's schema names this key "nice_to_have"
+                # (extractor.EXTRACTION_SCHEMA); "nice_to_have_skills" never
+                # appears in the cache, so reading it always counted zero.
+                nices = [s.lower() for s in data.get("nice_to_have") or []]
                 if skill_lower in reqs:
                     required += 1
                 if skill_lower in nices:
@@ -688,12 +750,35 @@ def log_query(path: str, question: str, tool_used: str | None, params: dict, ans
 
 
 def _row_count(conn: _CursorWrapper, table: str) -> int:
-    res = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-    return list(res.values())[0]
+    return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchval(0)
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _decode_example_ids(value: Any) -> list[str]:
+    """Decode the example_ids column, which write_gap_snapshot stores as JSON.
+
+    Tolerates the legacy comma-separated form so snapshots written by older
+    builds still resolve instead of silently yielding an empty list.
+    """
+    if isinstance(value, list):
+        return [str(i) for i in value]
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        decoded = json.loads(value)
+    except (ValueError, TypeError):
+        return [i.strip() for i in value.split(",") if i.strip()]
+    if isinstance(decoded, list):
+        return [str(i) for i in decoded]
+    return []
+
+
+def _days_ago_iso(days: int) -> str:
+    """ISO-8601 UTC timestamp *days* in the past, for TEXT column comparison."""
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
 
 # ---------------------------------------------------------------------------

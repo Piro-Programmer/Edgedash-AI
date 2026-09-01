@@ -1,0 +1,72 @@
+name: EdgeDash cycle
+
+# The Streamlit app is read-only by design: it renders whatever is already in
+# the database and never runs agents. This workflow is the writer — without it
+# the hosted Postgres stays empty and every panel renders an empty state.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   DATABASE_URL    the same Postgres connection string the Streamlit app uses
+#   GEMINI_API_KEY  key for the LLM provider configured in config.yaml
+
+on:
+  schedule:
+    # Every 6 hours, matching fetch_interval_hours in config.yaml.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  # A cycle reads state, plans, then writes. Two overlapping runs would plan
+  # against the same backlog and double-score the same listings.
+  group: edgedash-cycle
+  cancel-in-progress: false
+
+jobs:
+  run-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify secrets are present
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL secret is not set. The cycle would write to an ephemeral SQLite file that is discarded when this runner exits."
+            exit 1
+          fi
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::error::GEMINI_API_KEY secret is not set. The Scorer cannot extract facts without it."
+            exit 1
+          fi
+
+      - name: Apply schema migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m edgedash.storage --migrate
+
+      - name: Run cycle
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python run_cycle.py
+
+      - name: Report database contents
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m edgedash.storage --check

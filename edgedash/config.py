@@ -33,7 +33,7 @@ _DEFAULTS: dict = {
     "sources": ["arbeitnow"],
     "use_mock_fetcher": False,
     "llm_provider": "gemini",
-    "llm_model": "gemini-1.5-flash",
+    "llm_model": "gemini-3.5-flash",
     "llm_batch_size": 25,
     "score_batch_size": 50,
     "target_seniority": "mid",
@@ -69,8 +69,10 @@ class Config:
     min_fit_score: int
     sources: list[str] = field(default_factory=lambda: ["arbeitnow"])
     use_mock_fetcher: bool = False
-    llm_provider: str = "gemini"
-    llm_model: str = "gemini-3.5-flash"
+    llm_provider: str = _DEFAULTS["llm_provider"]
+    # Read from _DEFAULTS so the dataclass default cannot drift away from the
+    # one load_config() applies — these two disagreed on the model name.
+    llm_model: str = _DEFAULTS["llm_model"]
     llm_batch_size: int = 25
     score_batch_size: int = 50
     target_seniority: str = "mid"
