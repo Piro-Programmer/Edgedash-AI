@@ -37,3 +37,4 @@ class Agent(Protocol):
         stop_conditions: StopConditions | None = None,
     ) -> AgentResult:
         ...
+
