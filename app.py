@@ -38,6 +38,18 @@ import edgedash.storage as storage
 
 REPO_URL = "https://github.com/Piro-Programmer/Edgedash-AI"
 
+# Streamlit Cloud hot-swaps app.py on a git pull but keeps already-imported
+# edgedash.* modules in sys.modules, so a freshly deployed app.py can run for a
+# whole process lifetime against the PREVIOUS release's storage module. Reading
+# a newly added constant directly off `storage` therefore crashes the page with
+# AttributeError until someone reboots the app by hand. Resolve shared
+# vocabulary defensively so a stale worker degrades instead of white-screening;
+# storage stays the source of truth the moment the process restarts.
+_FALLBACK_FAILING = ("degraded", "partial", "failed")
+FAILING_STATUSES: tuple[str, ...] = getattr(
+    storage, "FAILING_STATUSES", _FALLBACK_FAILING
+)
+
 # ---------------------------------------------------------------------------
 # Error reporting helper
 # ---------------------------------------------------------------------------
@@ -151,7 +163,7 @@ st.markdown("""
 # SECTION 1 — Header strip
 # ---------------------------------------------------------------------------
 st.title("EdgeDash")
-st.caption("Read-only. The scheduler writes; this page only reads.")
+st.caption("The scheduler writes cycles. This page reads them.")
 
 latest_verdict_status: str | None = None
 latest_verdict_at: str | None = None
@@ -167,8 +179,9 @@ except Exception as exc:
     header_ok = False
     _panel_error("Header stats", exc)
 
-# An empty database is a normal state, not a fatal one. The page keeps
-# rendering so the activity log and the empty-state guidance stay visible.
+# An empty database is a normal state, not a fatal one — the scheduler simply
+# has not run yet. The page keeps rendering rather than calling st.stop(), and
+# the "no cycles yet" verdict plus the activity log carry the explanation.
 db_is_empty = header_ok and total_listings == 0 and not latest_verdict_at
 
 st.markdown("<br/>", unsafe_allow_html=True)
@@ -183,20 +196,13 @@ elif latest_verdict_at:
 col1.metric("Last successful cycle", cycle_ts)
 col2.metric("Total listings", str(total_listings))
 col3.metric("Total scored", str(scored_listings))
-col4.metric("Current verdict", str(latest_verdict_status or "none"))
-
-if db_is_empty:
-    st.info(
-        "**No cycles have run yet.** The dashboard is read-only — it renders "
-        "whatever the scheduler has written. Trigger the "
-        "`EdgeDash cycle` GitHub Actions workflow (or run `python run_cycle.py` "
-        "locally with `DATABASE_URL` set) to populate this database."
-    )
+# "no cycles yet" reads as a state; "none" reads as a missing value.
+col4.metric("Current verdict", latest_verdict_status or "no cycles yet")
 
 # Warning banner logic
 is_stale = False
 hide_panels = False
-if latest_verdict_status in storage.FAILING_STATUSES:
+if latest_verdict_status in FAILING_STATUSES:
     if not passing:
         hide_panels = True
         st.markdown(
@@ -331,13 +337,20 @@ try:
         }
 
     if not cycles:
-        st.info("No cycle data yet.")
+        st.caption("No cycle data yet.")
+        if db_is_empty:
+            # Kept small and in place of the table rather than as a banner at
+            # the top — the header already states there are no cycles.
+            st.caption(
+                "Run the **EdgeDash cycle** workflow in GitHub Actions to "
+                "populate this database."
+            )
     else:
         df = pd.DataFrame([parse_cycle_row(r) for r in cycles])
 
         def highlight_rows(row):
             # Apply dark red background to failed / degraded rows
-            if row["Verdict"] in storage.FAILING_STATUSES:
+            if row["Verdict"] in FAILING_STATUSES:
                 return ["background-color: rgba(239, 68, 68, 0.15)"] * len(row)
             return [""] * len(row)
 
