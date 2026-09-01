@@ -62,7 +62,6 @@ class Verifier:
         if verdict.passed:
             notes = f"VERDICT: pass — {verdict.summary}"
         else:
-            failed_names = [c.name for c in verdict.failed_checks]
             details = " | ".join(
                 f"{c.name} observed {c.observed} (min {c.threshold})"
                 for c in verdict.failed_checks

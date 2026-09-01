@@ -216,6 +216,63 @@ Switching providers is a one-line change in `config.yaml`. No code changes neede
 pytest tests/ -v
 ```
 
+`tests/conftest.py` blanks `DATABASE_URL` so the suite always runs against a
+temporary SQLite file. Never remove it — without it a local `.env` points the
+tests at the hosted Postgres and they will write to production.
+
+---
+
+## Deployment
+
+EdgeDash runs as **two separate pieces**. This split is the whole design:
+
+| Piece | Where | Role |
+|---|---|---|
+| `app.py` | Streamlit Community Cloud | **Reader.** Renders what is in the database. Never fetches, scores, or writes. |
+| `run_cycle.py` | GitHub Actions (`.github/workflows/cycle.yml`) | **Writer.** Runs the agent loop every 6 hours and writes to Postgres. |
+
+Both point at the same hosted Postgres. Deploying only the Streamlit app gives
+you a permanently empty dashboard, because nothing is writing to the database.
+
+### 1. Provision Postgres
+
+Any hosted Postgres works (Neon, Supabase, Railway). Copy its connection URI.
+
+### 2. Configure the Streamlit app
+
+In **Manage app → Settings → Secrets**, add:
+
+```toml
+DATABASE_URL = "postgresql://user:password@host/dbname?sslmode=require"
+GEMINI_API_KEY = "your-key"
+```
+
+Streamlit Cloud exposes secrets as environment variables, which is how
+`storage.py` and `llm.py` pick them up. `GEMINI_API_KEY` is needed only by the
+"Ask your data" panel.
+
+### 3. Configure the scheduler
+
+In **GitHub → Settings → Secrets and variables → Actions**, add repository
+secrets `DATABASE_URL` (same URI) and `GEMINI_API_KEY`.
+
+Then run the workflow once by hand to populate the database:
+**Actions → EdgeDash cycle → Run workflow**. After that it runs every 6 hours.
+
+The workflow fails loudly if either secret is missing, and `run_cycle.py` exits
+non-zero on a `degraded` outcome so a broken pipeline shows up as a red run
+rather than a silent green one.
+
+### Creating the schema
+
+`app.py` calls `storage.init_db()` on startup, and the workflow runs
+`python -m edgedash.storage --migrate` before each cycle. Both are
+`CREATE TABLE IF NOT EXISTS` only. To inspect a database:
+
+```bash
+python -m edgedash.storage --check
+```
+
 ---
 
 ## Requirements
