@@ -193,7 +193,15 @@ class _GeminiProvider:
                 # recommended path for the new google-genai SDK.
                 chat = self._client.chats.create(model=self._model)
                 response = chat.send_message(prompt)
-                return response.text
+                text = response.text
+                if not text:
+                    # A blocked or empty candidate yields text=None, which
+                    # would surface downstream as an opaque AttributeError.
+                    raise LLMError(
+                        f"Gemini returned an empty response for model "
+                        f"'{self._model}' (blocked or truncated candidate)."
+                    )
+                return text
             except Exception as exc:
                 msg = str(exc).lower()
                 is_quota = "429" in msg or "quota" in msg or "resource_exhausted" in msg
@@ -342,7 +350,7 @@ def complete_json(
             data = _extract_json(raw)
             _validate(data, schema)
             return data
-        except (ValueError, json.JSONDecodeError, Exception) as exc:
+        except Exception as exc:  # noqa: BLE001 — parse/validation failures retry
             last_error = exc
             # Loop once more if retries remain; otherwise fall through.
 
