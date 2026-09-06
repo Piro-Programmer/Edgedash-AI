@@ -1,0 +1,76 @@
+[storage] backend: postgres
+
+============================================================
+  EDGEDASH  —  cycle started
+  Role  : Security Engineer
+  City  : Berlin
+============================================================
+
+────────────────────────────────────────────────────────────
+  STATE
+────────────────────────────────────────────────────────────
+  Last fetch     : 2026-09-05T04:45:21  (24.2h ago)
+  Unscored       : 158
+  Gaps computed  : 2026-09-05T04:46:25  (fresh)
+  Last verdict   : degraded
+
+────────────────────────────────────────────────────────────
+  PLAN
+────────────────────────────────────────────────────────────
+  Fetcher      RUN   fetch new listings from all enabled sources
+               stop: max_items=200, max_pages=5
+               why : hours_since_fetch=24.2 >= 6.0
+────────────────────────────────────────────────────────────
+  Scorer       RUN   score up to 1 unscored listings
+               stop: max_items=1, max_seconds=300
+               why : unscored_count=158
+────────────────────────────────────────────────────────────
+  GapAnalyzer  SKIP  compute skill gaps
+               stop: —
+               why : skipped: gaps_stale=False, gaps_computed_at=2026-09-05T04:46:25.547215+00:00
+────────────────────────────────────────────────────────────
+  2 agent(s) will run  ·  1 skipped
+
+────────────────────────────────────────────────────────────
+  AGENT RUNS
+────────────────────────────────────────────────────────────
+  ✗  GapAnalyzer     SKIPPED           |  skipped: gaps_stale=False, gaps_computed_at=2026-09-05T04:46:25.547215+00:00
+  [arbeitnow] Fetched 800 raw listings across up to 5 page(s).
+  [arbeitnow] After keyword filter : 294 listings.
+  [arbeitnow] After location filter: 54 listings.
+  ✓  Fetcher         status=ok        new=22  17.1s  |  arbeitnow: 54 rows (22 new)
+  [Scorer] 1/1 — DevOps Engineer (x/f/m)
+  ✓  Scorer          status=ok        new=1  26.1s  |  scored 1 · range 40-40 · mean 40 · spread SUSPECT
+
+────────────────────────────────────────────────────────────
+  VERIFICATION
+────────────────────────────────────────────────────────────
+  ✗  Verifier        status=failed    new=0  8.2s  |  VERDICT: fail — check_extraction_sanity observed 27 (min 20) | check_gap_sample_size observed 2 (min 3)
+
+  ⟳  Verification failed. Retrying Scorer (strict_scoring=True) …
+
+  [Scorer] 1/1 — Senior Solutions Architect
+  ✓  Scorer          status=ok        new=1  11.6s  |  scored 1 · range 43-43 · mean 43 · spread SUSPECT
+  ✗  Verifier        status=failed    new=0  8.2s  |  VERDICT: fail — check_extraction_sanity observed 27 (min 20) | check_gap_sample_size observed 2 (min 3)
+
+  ⚠  Verification failed after retry. Cycle degraded. Stopping.
+
+────────────────────────────────────────────────────────────
+  CYCLE SUMMARY
+────────────────────────────────────────────────────────────
+  Outcome        : degraded
+  Agents run     : 5  |  skipped: 1
+  Total new rows : 24
+  Cycle duration : 89.6s
+────────────────────────────────────────────────────────────
+
+Cycle finished DEGRADED — verification failed after retry.
+[storage] backend: postgres
+Backend active : Postgres
+Connection URL : postgresql://postgres.enojwbchaunwzzcnbvay:Jbt_232526rao@aws-0-ap-southeast-2.pooler.supabase.com:5432/postgres
+Table listings              : 186 rows
+Table skill_gaps            : 0 rows
+Table cycle_log             : 56 rows
+Table extraction_cache      : 8 rows
+Table skill_gap_snapshots   : 70 rows
+Table query_log             : 0 rows

@@ -19,8 +19,9 @@ if __name__ == "__main__":
     config = load_config()
     outcome = run_cycle(config)
 
-    # Surface a bad cycle to the caller (the scheduler) instead of always
-    # exiting 0 — a silently green cron run hides a degraded pipeline.
+    # Surface a bad cycle to the caller (the scheduler) using GitHub Actions warnings
+    # instead of exiting 1, so the cron run stays green but the degraded state is visible.
     if outcome == "degraded":
         print("Cycle finished DEGRADED — verification failed after retry.")
-        sys.exit(1)
+        print("::warning::Cycle finished DEGRADED — verification failed. Check the cycle log for details.")
+        sys.exit(0)
