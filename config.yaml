@@ -1,38 +1,38 @@
 # EdgeDash user configuration
 # Edit these values to match your profile and job search preferences.
 
-target_role: "Security Engineer"
-target_city: "Berlin"
+target_role: 'Software Developer'
+target_city: 'bangalore'
 
 keywords:
-  - "security"
-  - "data analyst"
-  - "business intelligence"
-  - "SQL"
-  - "Python"
-  - "power bi"
-  - "tableau"
+  - 'security'
+  - 'data analyst'
+  - 'business intelligence'
+  - 'SQL'
+  - 'Python'
+  - 'power bi'
+  - 'tableau'
 
 my_skills:
-  - "security"
-  - "Python"
-  - "SQL"
-  - "pandas"
-  - "Excel"
-  - "data visualisation"
-  - "statistical analysis"
+  - 'Node.js'
+  - 'React'
+  - 'SQL'
+  - 'Python'
+  - 'Express.js'
+  - 'data visualisation'
+  - 'API development'
 
 experience_years: 3
 
 # Absolute or relative path to the SQLite database file.
-db_path: "edgedash.db"
+db_path: 'edgedash.db'
 
 # Listings with a fit_score below this threshold are hidden from the dashboard.
 min_fit_score: 60
 
 # Which job sources to run. Each name must match a @register-ed Source class.
 sources:
-  - "arbeitnow"
+  - 'arbeitnow'
 
 # Set to true to use MockFetcher instead of the real Fetcher (offline dev mode).
 use_mock_fetcher: false
@@ -40,8 +40,8 @@ use_mock_fetcher: false
 # LLM provider: "gemini" or "ollama"
 # gemini requires GEMINI_API_KEY in your .env file.
 # ollama requires a local Ollama server (no key needed).
-llm_provider: "gemini"
-llm_model: "gemini-3.5-flash"
+llm_provider: 'gemini'
+llm_model: 'gemini-3.5-flash'
 
 # ── SCORING ──────────────────────────────────────────────────────────────────
 # Max listings scored per cycle (rule 21 — cost/rate-limit guard).
@@ -59,19 +59,19 @@ analyse_max_seconds: 60
 
 # ── VERIFICATION ─────────────────────────────────────────────────────────────
 # Verification checks — pure functions that catch failure modes.
-min_score_spread: 10              # Catches score inflation/compression
-min_score_stdev: 5.0              # Catches lack of score variance
-max_empty_extraction_pct: 20.0    # Catches broken extractors returning empty lists
-max_skills_per_listing: 20        # Catches extractors returning full sentences instead of bullet points
-min_gap_sample: 3                 # Catches ranking a rumour
-max_data_age_days: 3              # Catches stale data
+min_score_spread: 10 # Catches score inflation/compression
+min_score_stdev: 5.0 # Catches lack of score variance
+max_empty_extraction_pct: 20.0 # Catches broken extractors returning empty lists
+max_skills_per_listing: 40 # Catches extractors returning full sentences instead of bullet points
+min_gap_sample: 1 # Catches ranking a rumour
+max_data_age_days: 3 # Catches stale data
 
 # Scoring weights — must sum to 1.0. Tune these without touching code.
 # skill_match:   fraction of required skills present in my_skills profile.
 # seniority_fit: how close the listing's seniority is to target_seniority.
 # location_fit:  remote-ok / city match / unknown / elsewhere.
 # recency:       how recently the listing was posted (decays over 30 days).
-target_seniority: "mid"
+target_seniority: 'mid'
 weight_skill_match: 0.45
 weight_seniority_fit: 0.25
 weight_location_fit: 0.15
@@ -87,28 +87,28 @@ weight_recency: 0.15
 # The raw forms (the keys) are whatever the extractor or you have seen in the wild.
 skill_aliases:
   # Kubernetes and its managed flavours
-  "k8s":  "kubernetes"
-  "gke":  "kubernetes"
+  'k8s': 'kubernetes'
+  'gke': 'kubernetes'
 
   # Cloud platforms — GCP is the canonical short form
-  "google cloud platform": "gcp"
-  "google cloud":          "gcp"
+  'google cloud platform': 'gcp'
+  'google cloud': 'gcp'
 
   # Node.js — kept SEPARATE from javascript; they are different skills
-  "node":   "node.js"
-  "nodejs": "node.js"
+  'node': 'node.js'
+  'nodejs': 'node.js'
 
   # PostgreSQL spellings
-  "postgresql": "postgres"
-  "psql":       "postgres"
+  'postgresql': 'postgres'
+  'psql': 'postgres'
 
   # CI/CD spellings
-  "ci cd": "ci/cd"
-  "cicd":  "ci/cd"
+  'ci cd': 'ci/cd'
+  'cicd': 'ci/cd'
 
   # Machine learning shorthand
-  "ml": "machine learning"
+  'ml': 'machine learning'
 
   # Framework dot-normalisation
-  "nestjs": "nest.js"
-  "nextjs": "next.js"
+  'nestjs': 'nest.js'
+  'nextjs': 'next.js'

@@ -31,7 +31,7 @@ from edgedash.config import Config
 from edgedash.planning import Plan, StopConditions, Task, build_plan
 from edgedash.state import read_state
 
-_SEP = "─" * 60
+_SEP = "-" * 60
 
 # ---------------------------------------------------------------------------
 # Agent registry — the ONLY place the Orchestrator couples to agent classes.
