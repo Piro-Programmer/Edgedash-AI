@@ -26,6 +26,24 @@ class LLMError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Transient-error detection (retried with backoff, like 429s)
+# ---------------------------------------------------------------------------
+
+_GEMINI_ATTEMPTS: int = 4
+_TRANSIENT_MARKERS: tuple[str, ...] = (
+    "500", "502", "503", "504",
+    "unavailable", "overloaded", "high demand",
+    "internal", "deadline_exceeded", "timed out", "timeout",
+)
+
+
+def _is_transient_error(msg: str) -> bool:
+    """True for server-side errors that usually succeed on retry."""
+    msg = msg.lower()
+    return any(marker in msg for marker in _TRANSIENT_MARKERS)
+
+
+# ---------------------------------------------------------------------------
 # Rate-limiter (rule 15: ≥1 s between calls, ≤15 calls / 60 s)
 # ---------------------------------------------------------------------------
 
@@ -187,7 +205,7 @@ class _GeminiProvider:
 
     def call(self, prompt: str) -> str:
         backoff = 10.0  # fallback backoff
-        for attempt in range(3):
+        for attempt in range(_GEMINI_ATTEMPTS):
             try:
                 # Use chats API — avoids the AFC warning and is the
                 # recommended path for the new google-genai SDK.
@@ -203,20 +221,27 @@ class _GeminiProvider:
                     )
                 return text
             except Exception as exc:
+                if isinstance(exc, LLMError):
+                    raise
                 msg = str(exc).lower()
                 is_quota = "429" in msg or "quota" in msg or "resource_exhausted" in msg
-                if is_quota and attempt < 2:
+                # 5xx / UNAVAILABLE ("model is experiencing high demand") is
+                # transient on Gemini and succeeds on retry. Treating it as
+                # fatal failed the same listing every cycle in production.
+                is_transient = _is_transient_error(msg)
+                if (is_quota or is_transient) and attempt < _GEMINI_ATTEMPTS - 1:
                     m = re.search(r"retry in (\d+(?:\.\d+)?)s", msg)
                     if m:
                         delay = float(m.group(1)) + 1.0
                     else:
                         delay = backoff
                         backoff *= 2
-                    print(f"  [LLM] Rate limit hit. Sleeping {delay:.1f}s before retry...", flush=True)
+                    kind = "Rate limit hit" if is_quota else "Transient server error"
+                    print(f"  [LLM] {kind}. Sleeping {delay:.1f}s before retry...", flush=True)
                     time.sleep(delay)
                     continue
                 raise LLMError(f"Gemini API error: {exc}") from exc
-        raise LLMError("Gemini quota exhausted after 3 backoff attempts.")
+        raise LLMError(f"Gemini still failing after {_GEMINI_ATTEMPTS} attempts.")
 
 
 class _OllamaProvider:

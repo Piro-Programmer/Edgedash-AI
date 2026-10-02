@@ -23,6 +23,7 @@ from edgedash.llm import LLMError
 from edgedash.scoring import score_listing
 
 _SUSPECT_SPREAD_THRESHOLD = 10   # spread < this → flag as suspect (rule 20)
+_SPARE_CANDIDATES = 2            # extra listings tried only to replace failures
 
 
 class Scorer:
@@ -56,7 +57,12 @@ class Scorer:
             else False
         )
 
-        batch = storage.get_unscored_listings(storage_path, batch_size)
+        # Pull a few spare candidates so one listing that keeps failing does
+        # not block the queue: with batch_size=1 the oldest unscored listing
+        # was retried (and failed) every cycle while nothing else got scored.
+        batch = storage.get_unscored_listings(
+            storage_path, batch_size + _SPARE_CANDIDATES
+        )
 
         if not batch:
             return AgentResult(
@@ -72,6 +78,9 @@ class Scorer:
         timeout_note: str = ""
 
         for i, listing in enumerate(batch, start=1):
+            # Stop once the real batch quota is met (spares only cover failures).
+            if scored_count >= batch_size:
+                break
             # Respect max_seconds stop condition.
             if deadline and time.monotonic() > deadline:
                 timeout_note = f" · stopped: max_seconds={max_seconds} reached"
