@@ -120,6 +120,43 @@ CREATE TABLE IF NOT EXISTS query_log (
 )
 """
 
+def _ddl_users() -> str:
+    return """
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    email         TEXT,
+    name          TEXT,
+    created_at    TEXT NOT NULL,
+    last_login_at TEXT NOT NULL
+)
+"""
+
+def _ddl_user_profiles() -> str:
+    return """
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id          TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    my_skills        TEXT NOT NULL,
+    target_role      TEXT,
+    target_city      TEXT,
+    target_seniority TEXT,
+    weights          TEXT NOT NULL,
+    min_fit_score    INTEGER NOT NULL,
+    updated_at       TEXT NOT NULL
+)
+"""
+
+def _ddl_tracked_jobs() -> str:
+    return """
+CREATE TABLE IF NOT EXISTS tracked_jobs (
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    listing_id  TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    notes       TEXT,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (user_id, listing_id)
+)
+"""
+
 # ---------------------------------------------------------------------------
 # Connection helper
 # ---------------------------------------------------------------------------
@@ -223,7 +260,10 @@ def init_db(path: str) -> None:
         conn.execute(_ddl_extraction_cache())
         conn.execute(_ddl_skill_gap_snapshots())
         conn.execute(_ddl_query_log())
-        
+        conn.execute(_ddl_users())
+        conn.execute(_ddl_user_profiles())
+        conn.execute(_ddl_tracked_jobs())
+
         # We handle scored_at natively in DDL now, but for old SQLite:
         if not _POSTGRES_URL:
             _add_column_if_missing(conn, "listings", "scored_at", "TEXT")
@@ -749,6 +789,149 @@ def log_query(path: str, question: str, tool_used: str | None, params: dict, ans
         conn.execute(sql, (question, tool_used, p_str, int(answerable), duration_s, _utcnow()))
 
 
+# ---------------------------------------------------------------------------
+# Per-user data (auth, profiles, tracked jobs)
+#
+# Every function here takes user_id as a required argument and filters on it.
+# Callers must source user_id from the authenticated session (st.user.sub),
+# never from request input — that is the whole isolation boundary.
+# ---------------------------------------------------------------------------
+
+TRACKED_STATUSES: tuple[str, ...] = ("saved", "applied", "interview", "offer", "rejected")
+
+
+def upsert_user(path: str, user_id: str, email: str | None, name: str | None) -> None:
+    now = _utcnow()
+    sql = """
+        INSERT INTO users (id, email, name, created_at, last_login_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET
+            email = excluded.email,
+            name = excluded.name,
+            last_login_at = excluded.last_login_at
+    """
+    with _connect(path) as conn:
+        conn.execute(sql, (user_id, email, name, now, now))
+
+
+def get_profile(path: str, user_id: str) -> dict[str, Any] | None:
+    with _connect(path) as conn:
+        row = conn.execute(
+            "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    row["my_skills"] = json.loads(row["my_skills"] or "[]")
+    row["weights"] = json.loads(row["weights"] or "{}")
+    return row
+
+
+def save_profile(path: str, user_id: str, profile: dict[str, Any]) -> None:
+    sql = """
+        INSERT INTO user_profiles (
+            user_id, my_skills, target_role, target_city, target_seniority,
+            weights, min_fit_score, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (user_id) DO UPDATE SET
+            my_skills = excluded.my_skills,
+            target_role = excluded.target_role,
+            target_city = excluded.target_city,
+            target_seniority = excluded.target_seniority,
+            weights = excluded.weights,
+            min_fit_score = excluded.min_fit_score,
+            updated_at = excluded.updated_at
+    """
+    with _connect(path) as conn:
+        conn.execute(sql, (
+            user_id,
+            json.dumps(list(profile.get("my_skills") or [])),
+            profile.get("target_role"),
+            profile.get("target_city"),
+            profile.get("target_seniority"),
+            json.dumps(dict(profile.get("weights") or {})),
+            int(profile.get("min_fit_score") or 0),
+            _utcnow(),
+        ))
+
+
+def list_tracked(path: str, user_id: str) -> list[dict[str, Any]]:
+    sql = """
+        SELECT t.listing_id, t.status, t.notes, t.updated_at,
+               l.title, l.company, l.location, l.url, l.posted_at
+        FROM tracked_jobs t
+        LEFT JOIN listings l ON l.id = t.listing_id
+        WHERE t.user_id = ?
+        ORDER BY t.updated_at DESC
+    """
+    with _connect(path) as conn:
+        return conn.execute(sql, (user_id,)).fetchall()
+
+
+def set_tracked_status(
+    path: str,
+    user_id: str,
+    listing_id: str,
+    status: str,
+    notes: str | None = None,
+) -> None:
+    if status not in TRACKED_STATUSES:
+        raise ValueError(f"status must be one of {TRACKED_STATUSES}, got {status!r}")
+    sql = """
+        INSERT INTO tracked_jobs (user_id, listing_id, status, notes, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (user_id, listing_id) DO UPDATE SET
+            status = excluded.status,
+            notes = excluded.notes,
+            updated_at = excluded.updated_at
+    """
+    with _connect(path) as conn:
+        conn.execute(sql, (user_id, listing_id, status, notes, _utcnow()))
+
+
+def remove_tracked(path: str, user_id: str, listing_id: str) -> None:
+    with _connect(path) as conn:
+        conn.execute(
+            "DELETE FROM tracked_jobs WHERE user_id = ? AND listing_id = ?",
+            (user_id, listing_id),
+        )
+
+
+def get_listings_with_facts(path: str) -> list[dict[str, Any]]:
+    """Every listing whose facts are already extracted, with facts attached.
+
+    Unlike get_scored_listings_with_cache this does not require a global
+    fit_score: per-user scoring only needs the cached facts, so listings the
+    shared Scorer extracted but scored for a different profile still count.
+    """
+    # listings stores no description hash, so the join happens in Python using
+    # the same sha256 key the extractor writes (see get_scored_listings_with_cache).
+    with _connect(path) as conn:
+        cache_rows = conn.execute(
+            "SELECT description_hash, result_json FROM extraction_cache"
+        ).fetchall()
+        if not cache_rows:
+            return []
+        listing_rows = conn.execute(
+            "SELECT id, title, company, location, url, description, source, "
+            "posted_at, fetched_at FROM listings WHERE description IS NOT NULL"
+        ).fetchall()
+
+    cache = {r["description_hash"]: r["result_json"] for r in cache_rows}
+    out: list[dict[str, Any]] = []
+    for row in listing_rows:
+        desc = row.get("description") or ""
+        h = hashlib.sha256(desc.encode("utf-8", errors="replace")).hexdigest()
+        raw = cache.get(h)
+        if raw is None:
+            continue
+        try:
+            row["facts"] = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        out.append(row)
+    return out
+
+
 def _row_count(conn: _CursorWrapper, table: str) -> int:
     return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchval(0)
 
@@ -810,7 +993,7 @@ if __name__ == "__main__":
             
         try:
             with _connect(DB) as conn:
-                for table in ["listings", "skill_gaps", "cycle_log", "extraction_cache", "skill_gap_snapshots", "query_log"]:
+                for table in ["listings", "skill_gaps", "cycle_log", "extraction_cache", "skill_gap_snapshots", "query_log", "users", "user_profiles", "tracked_jobs"]:
                     try:
                         count = _row_count(conn, table)
                         print(f"Table {table:<22}: {count} rows")
