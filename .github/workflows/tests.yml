@@ -1,0 +1,58 @@
+name: CI
+
+# The "CI" half of CI/CD: run the full test suite on every pull request into
+# master and on every push to master, so a change that breaks something shows
+# a red check BEFORE it is merged and deployed.
+#
+#   CI  (this file)  — tests every proposed change
+#   CD               — Streamlit Cloud redeploys the site when master changes
+#   Scheduler        — cycle.yml runs the agent loop daily against Postgres
+#
+# This job never touches production: it is given no secrets, and
+# tests/conftest.py blanks DATABASE_URL so storage falls back to a throwaway
+# SQLite file.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Read-only token: tests need to check out code, nothing more.
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to a PR makes the previous run's result irrelevant, so cancel
+  # it. Pushes to master group by commit SHA and are never cancelled — every
+  # merged commit gets its own verdict.
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # Same interpreter as the scheduled cycle (cycle.yml).
+          python-version-file: '.python-version'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run test suite
+        run: python -m pytest -q --durations=5
