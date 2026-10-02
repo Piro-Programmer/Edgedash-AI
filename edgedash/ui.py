@@ -9,14 +9,15 @@ re-implementing setup, so there is one place that decides who the user is.
 from __future__ import annotations
 
 import logging
+import time
 import traceback
 from typing import Any
 
 import streamlit as st
 
 import edgedash.storage as storage
+from edgedash import auth, personal
 from edgedash.config import Config, load_config
-from edgedash import personal
 
 
 # ---------------------------------------------------------------------------
@@ -65,46 +66,93 @@ def panel_error(label: str, exc: Exception) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Authentication (Streamlit native OIDC — st.login / st.user / st.logout)
+# Authentication (email + password, session-scoped)
+#
+# st.session_state["user"] is set ONLY by sign_up() / log_in() after the
+# password checks out, and its "id" is the ONLY value pages may pass as
+# user_id to storage. A browser refresh starts a new Streamlit session, so
+# users log in again after reloading the page.
 # ---------------------------------------------------------------------------
 
-def auth_configured() -> bool:
-    """True when an [auth] block with a Google provider is in secrets."""
+_SESSION_KEY = "user"
+_MAX_FAILED_LOGINS = 5
+_LOCKOUT_SECONDS = 60
+
+
+def current_user(db_path: str | None = None) -> dict[str, str] | None:
+    """The logged-in user for this browser session, or None."""
+    return st.session_state.get(_SESSION_KEY)
+
+
+def _start_session(user_id: str, email: str, name: str) -> None:
+    st.session_state[_SESSION_KEY] = {"id": user_id, "email": email, "name": name}
+    st.session_state.pop("_has_profile", None)
+    st.session_state.pop("_failed_logins", None)
+
+
+def log_out() -> None:
+    # Drop everything tied to the account, not just the user key, so the next
+    # person on this browser tab starts clean.
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+
+
+def sign_up(db_path: str, name: str, email: str, password: str, confirm: str) -> str | None:
+    """Create an account and log in. Returns an error message, or None."""
+    email = auth.normalize_email(email)
+    name = (name or "").strip()
+    if not name:
+        return "Enter your name."
+    if len(name) > 80:
+        return "Name must be at most 80 characters."
+    error = auth.validate_email(email) or auth.validate_password(password)
+    if error:
+        return error
+    if password != confirm:
+        return "Passwords don't match."
     try:
-        auth = st.secrets.get("auth")
-    except Exception:  # no secrets.toml at all
-        return False
-    return bool(auth) and "google" in auth
+        user_id = storage.create_user(db_path, email, name, auth.hash_password(password))
+    except storage.EmailTakenError:
+        return "An account with this email already exists. Log in instead."
+    _start_session(user_id, email, name)
+    return None
 
 
-def current_user(db_path: str) -> dict[str, str] | None:
-    """The signed-in user, or None. Records the login once per session.
+def log_in(db_path: str, email: str, password: str) -> str | None:
+    """Check credentials and start a session. Returns an error message, or None."""
+    locked_until = st.session_state.get("_locked_until", 0)
+    if time.time() < locked_until:
+        return f"Too many attempts. Try again in {int(locked_until - time.time()) + 1}s."
 
-    The user id is the OIDC subject (Google's stable account id). It is the
-    ONLY value pages may pass as user_id to storage — never anything taken
-    from widgets or query params.
-    """
-    if not auth_configured() or not st.user.is_logged_in:
+    email = auth.normalize_email(email)
+    row = storage.get_user_for_login(db_path, email) if email else None
+    if row and auth.verify_password(password, row.get("password_hash")):
+        storage.record_login(db_path, row["id"])
+        _start_session(row["id"], row["email"], row.get("name") or row["email"])
         return None
-    user = {
-        "id": str(st.user.get("sub")),
-        "email": st.user.get("email") or "",
-        "name": st.user.get("name") or st.user.get("email") or "you",
-    }
-    if st.session_state.get("_recorded_login") != user["id"]:
-        storage.upsert_user(db_path, user["id"], user["email"], user["name"])
-        st.session_state["_recorded_login"] = user["id"]
-    return user
+
+    if not row:
+        auth.burn_verify_time(password or "x")   # same timing as a wrong password
+    fails = st.session_state.get("_failed_logins", 0) + 1
+    st.session_state["_failed_logins"] = fails
+    if fails >= _MAX_FAILED_LOGINS:
+        st.session_state["_locked_until"] = time.time() + _LOCKOUT_SECONDS
+        st.session_state["_failed_logins"] = 0
+    # Same message whether the email exists or not.
+    return "Incorrect email or password."
 
 
 def require_user(db_path: str) -> dict[str, str]:
-    """Return the signed-in user or stop the page with a sign-in prompt."""
+    """Return the logged-in user or stop the page with a login prompt."""
     user = current_user(db_path)
     if user is None:
-        st.info("Sign in with Google to see this page.")
-        if auth_configured():
-            st.button("Continue with Google", on_click=st.login, args=("google",),
-                      type="primary", key="require_login_btn")
+        st.info("Log in or create a free account to see this page.")
+        try:
+            st.page_link("views/account.py", label="Log in / Sign up", icon="🔐")
+        except Exception:
+            # page_link only resolves pages registered in the current
+            # navigation; fall back to plain guidance rather than crash.
+            st.caption("Use **Log in / Sign up** in the sidebar.")
         st.stop()
     return user
 

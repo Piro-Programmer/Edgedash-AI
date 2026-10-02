@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS users (
     id            TEXT PRIMARY KEY,
     email         TEXT,
     name          TEXT,
+    password_hash TEXT,
     created_at    TEXT NOT NULL,
     last_login_at TEXT NOT NULL
 )
@@ -267,6 +268,15 @@ def init_db(path: str) -> None:
         # We handle scored_at natively in DDL now, but for old SQLite:
         if not _POSTGRES_URL:
             _add_column_if_missing(conn, "listings", "scored_at", "TEXT")
+            _add_column_if_missing(conn, "users", "password_hash", "TEXT")
+        else:
+            # users first shipped without password_hash (the short-lived
+            # Google sign-in build), so existing tables need the column added.
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT")
+        # One account per email, case-insensitively. NULL emails don't collide.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users (lower(email))"
+        )
 
 def _add_column_if_missing(
     conn: _CursorWrapper,
@@ -793,25 +803,57 @@ def log_query(path: str, question: str, tool_used: str | None, params: dict, ans
 # Per-user data (auth, profiles, tracked jobs)
 #
 # Every function here takes user_id as a required argument and filters on it.
-# Callers must source user_id from the authenticated session (st.user.sub),
-# never from request input — that is the whole isolation boundary.
+# Callers must source user_id from the logged-in session (set only by a
+# successful password check), never from request input — that is the whole
+# isolation boundary.
 # ---------------------------------------------------------------------------
 
 TRACKED_STATUSES: tuple[str, ...] = ("saved", "applied", "interview", "offer", "rejected")
 
 
-def upsert_user(path: str, user_id: str, email: str | None, name: str | None) -> None:
+class EmailTakenError(ValueError):
+    """Raised by create_user when an account already uses the email."""
+
+
+def create_user(path: str, email: str, name: str, password_hash: str) -> str:
+    """Insert a new account and return its id. Email must be normalised."""
+    import uuid
+
+    user_id = uuid.uuid4().hex
     now = _utcnow()
-    sql = """
-        INSERT INTO users (id, email, name, created_at, last_login_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (id) DO UPDATE SET
-            email = excluded.email,
-            name = excluded.name,
-            last_login_at = excluded.last_login_at
-    """
+    try:
+        with _connect(path) as conn:
+            if conn.execute(
+                "SELECT 1 FROM users WHERE lower(email) = ?", (email,)
+            ).fetchone():
+                raise EmailTakenError(email)
+            conn.execute(
+                "INSERT INTO users (id, email, name, password_hash, created_at, last_login_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, email, name, password_hash, now, now),
+            )
+    except EmailTakenError:
+        raise
+    except Exception as exc:
+        # Two sign-ups racing past the SELECT: the unique index decides.
+        if "unique" in str(exc).lower() or "IntegrityError" in type(exc).__name__:
+            raise EmailTakenError(email) from exc
+        raise
+    return user_id
+
+
+def get_user_for_login(path: str, email: str) -> dict[str, Any] | None:
+    """id, email, name and password_hash for a normalised email, or None."""
     with _connect(path) as conn:
-        conn.execute(sql, (user_id, email, name, now, now))
+        return conn.execute(
+            "SELECT id, email, name, password_hash FROM users WHERE lower(email) = ?",
+            (email,),
+        ).fetchone()
+
+
+def record_login(path: str, user_id: str) -> None:
+    with _connect(path) as conn:
+        conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (_utcnow(), user_id))
 
 
 def get_profile(path: str, user_id: str) -> dict[str, Any] | None:
