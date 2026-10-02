@@ -228,7 +228,7 @@ EdgeDash runs as **two separate pieces**. This split is the whole design:
 
 | Piece | Where | Role |
 |---|---|---|
-| `app.py` | Streamlit Community Cloud | **Reader.** Renders what is in the database. Never fetches, scores, or writes. |
+| `app.py` | Streamlit Community Cloud | **Reader.** Renders what is in the database. Never fetches or runs agents; its only writes are signed-in users' own profiles and tracked jobs. |
 | `run_cycle.py` | GitHub Actions (`.github/workflows/cycle.yml`) | **Writer.** Runs the agent loop every 6 hours and writes to Postgres. |
 
 Both point at the same hosted Postgres. Deploying only the Streamlit app gives
@@ -250,6 +250,24 @@ GEMINI_API_KEY = "your-key"
 Streamlit Cloud exposes secrets as environment variables, which is how
 `storage.py` and `llm.py` pick them up. `GEMINI_API_KEY` is needed only by the
 "Ask your data" panel.
+
+### 2b. Enable Google sign-in (per-user dashboards)
+
+Signed-in users get **My Dashboard** (personal scores, filters, skill gaps,
+market charts), **My Profile** (skills, city, seniority, scoring weights) and
+**Tracked Jobs** (saved → applied → interview → offer). Without this step the
+site still works and shows only the public Overview.
+
+1. In [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials),
+   create an **OAuth client ID** (Web application) with redirect URIs
+   `https://<your-app>.streamlit.app/oauth2callback` and
+   `http://localhost:8501/oauth2callback`.
+2. Add the `[auth]` block from `.streamlit/secrets.toml.example` to the app's
+   Secrets, with `redirect_uri` set to the `streamlit.app` URL.
+
+Personal scores are computed on page load from facts the scheduler has already
+extracted, so signed-in users never trigger LLM calls. The number of listings a
+user can be matched against grows with `llm_batch_size`.
 
 ### 3. Configure the scheduler
 
