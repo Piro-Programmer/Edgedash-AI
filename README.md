@@ -251,19 +251,18 @@ Streamlit Cloud exposes secrets as environment variables, which is how
 `storage.py` and `llm.py` pick them up. `GEMINI_API_KEY` is needed only by the
 "Ask your data" panel.
 
-### 2b. Enable Google sign-in (per-user dashboards)
+### User accounts (per-user dashboards)
 
-Signed-in users get **My Dashboard** (personal scores, filters, skill gaps,
+Visitors can create an account with **email + password** on the
+**Log in / Sign up** page. No extra setup or secrets are needed: accounts live
+in the same database, and passwords are stored only as salted PBKDF2-SHA256
+hashes (`edgedash/auth.py`).
+
+Logged-in users get **My Dashboard** (personal scores, filters, skill gaps,
 market charts), **My Profile** (skills, city, seniority, scoring weights) and
-**Tracked Jobs** (saved → applied → interview → offer). Without this step the
-site still works and shows only the public Overview.
-
-1. In [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials),
-   create an **OAuth client ID** (Web application) with redirect URIs
-   `https://<your-app>.streamlit.app/oauth2callback` and
-   `http://localhost:8501/oauth2callback`.
-2. Add the `[auth]` block from `.streamlit/secrets.toml.example` to the app's
-   Secrets, with `redirect_uri` set to the `streamlit.app` URL.
+**Tracked Jobs** (saved → applied → interview → offer). Logins last for the
+browser session; reloading the page asks the user to log in again. After 5
+wrong passwords, login is paused for 60 seconds in that session.
 
 Personal scores are computed on page load from facts the scheduler has already
 extracted, so signed-in users never trigger LLM calls. The number of listings a

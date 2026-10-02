@@ -9,12 +9,22 @@ import pytest
 import edgedash.storage as storage
 
 
+def _add_user(path: str, user_id: str, email: str) -> None:
+    """Insert a user with a fixed id so the tests below can name them."""
+    with storage._connect(path) as conn:
+        conn.execute(
+            "INSERT INTO users (id, email, name, password_hash, created_at, last_login_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, email, user_id.title(), "x", "2026-01-01", "2026-01-01"),
+        )
+
+
 @pytest.fixture
 def db(tmp_path):
     path = str(tmp_path / "users.db")
     storage.init_db(path)
-    storage.upsert_user(path, "alice", "alice@example.com", "Alice")
-    storage.upsert_user(path, "bob", "bob@example.com", "Bob")
+    _add_user(path, "alice", "alice@example.com")
+    _add_user(path, "bob", "bob@example.com")
     return path
 
 
@@ -29,12 +39,30 @@ _PROFILE = {
 }
 
 
-def test_upsert_user_is_idempotent(db):
-    storage.upsert_user(db, "alice", "new@example.com", "Alice B")
-    with storage._connect(db) as conn:
-        rows = conn.execute("SELECT * FROM users WHERE id = ?", ("alice",)).fetchall()
-    assert len(rows) == 1
-    assert rows[0]["email"] == "new@example.com"
+def test_create_user_and_lookup(db):
+    uid = storage.create_user(db, "carol@example.com", "Carol", "hash")
+    row = storage.get_user_for_login(db, "carol@example.com")
+    assert row["id"] == uid
+    assert row["password_hash"] == "hash"
+    assert storage.get_user_for_login(db, "nobody@example.com") is None
+
+
+def test_create_user_rejects_duplicate_email_case_insensitively(db):
+    with pytest.raises(storage.EmailTakenError):
+        storage.create_user(db, "alice@example.com", "Alice 2", "hash")
+    # The unique index also guards against a race past the pre-check.
+    with pytest.raises(Exception):
+        _add_user(db, "alice-dup", "ALICE@example.com")
+
+
+def test_init_db_migrates_users_table_without_password_hash(tmp_path):
+    path = str(tmp_path / "old.db")
+    with storage._connect(path) as conn:
+        conn.execute("CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT, name TEXT, "
+                     "created_at TEXT NOT NULL, last_login_at TEXT NOT NULL)")
+    storage.init_db(path)
+    uid = storage.create_user(path, "dan@example.com", "Dan", "hash")
+    assert storage.get_user_for_login(path, "dan@example.com")["id"] == uid
 
 
 def test_profile_round_trip(db):

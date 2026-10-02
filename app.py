@@ -1,12 +1,11 @@
 """
 app.py — EdgeDash entry point and page router.
 
-Public:     Overview (the shared agent-activity dashboard).
-Signed in:  My Dashboard, My Profile, Tracked Jobs — all per-user.
+Public:     Overview (the shared agent-activity dashboard), Log in / Sign up.
+Logged in:  My Dashboard, My Profile, Tracked Jobs — all per-user.
 
-Sign-in uses Streamlit's native OIDC (st.login) with Google; configure it
-in .streamlit/secrets.toml (see .streamlit/secrets.toml.example). Without
-that block the site still works, just with the public Overview only.
+Accounts are email + password, stored (hashed) in the app's own database;
+no external identity provider or extra secrets are needed.
 
 Run:  python -m streamlit run app.py
 """
@@ -22,7 +21,7 @@ st.set_page_config(
 )
 
 import edgedash.storage as storage
-from edgedash.ui import auth_configured, bootstrap, current_user
+from edgedash.ui import bootstrap, current_user, log_out
 
 cfg = bootstrap()
 user = current_user(cfg.db_path)
@@ -30,7 +29,8 @@ user = current_user(cfg.db_path)
 overview = st.Page("views/overview.py", title="Overview", icon="📡", url_path="overview")
 
 if user is None:
-    pages = [overview]
+    account = st.Page("views/account.py", title="Log in / Sign up", icon="🔐", url_path="account")
+    pages = [overview, account]
 else:
     dashboard = st.Page("views/dashboard.py", title="My Dashboard", icon="🎯",
                         url_path="dashboard", default=True)
@@ -43,23 +43,22 @@ else:
 # ── Sidebar: account ─────────────────────────────────────────────────────────
 with st.sidebar:
     if user is not None:
-        st.caption("Signed in as")
+        st.caption("Logged in as")
         st.markdown(f"**{user['name']}**  \n{user['email']}")
-        st.button("Log out", on_click=st.logout, width="stretch")
-    elif auth_configured():
-        st.markdown("**Your own job matches**")
-        st.caption("Sign in to set your skills and get personal scores, "
-                   "skill gaps and a job tracker.")
-        st.button("Continue with Google", on_click=st.login, args=("google",),
-                  type="primary", width="stretch")
+        st.button("Log out", on_click=log_out, width="stretch")
     else:
-        st.caption("Sign-in is not configured on this deployment.")
+        st.markdown("**Your own job matches**")
+        st.caption("Create a free account to set your skills and get personal "
+                   "scores, skill gaps and a job tracker.")
+        st.page_link(account, label="Log in / Sign up", icon="🔐")
 
 nav = st.navigation(pages)
 
-# First sign-in: send the user to onboarding before the dashboard. The
+# First login: send the user to onboarding before the dashboard. The
 # profile page sets _has_profile on save, so this costs one query per session.
-if user is not None and nav.url_path == "dashboard" and not st.session_state.get("_has_profile"):
+# Compare by title: Streamlit reports the default page's url_path as "", so
+# the previous `nav.url_path == "dashboard"` check never fired.
+if user is not None and nav.title == "My Dashboard" and not st.session_state.get("_has_profile"):
     if storage.get_profile(cfg.db_path, user["id"]) is None:
         st.switch_page("views/profile.py")
     st.session_state["_has_profile"] = True
