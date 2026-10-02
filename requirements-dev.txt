@@ -1,0 +1,7 @@
+# Development and CI dependencies: everything the app needs, plus test tooling.
+# Streamlit Cloud installs only requirements.txt, so pytest stays out of the
+# deployed app.
+#
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+pytest==9.1.1

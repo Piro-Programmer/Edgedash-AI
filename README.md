@@ -1,5 +1,7 @@
 # EdgeDash — Autonomous AI Career Intelligence Agent
 
+[![CI](https://github.com/Piro-Programmer/Edgedash-AI/actions/workflows/tests.yml/badge.svg)](https://github.com/Piro-Programmer/Edgedash-AI/actions/workflows/tests.yml)
+
 EdgeDash is a scheduled agentic loop that fetches live job listings, scores them for fit against your profile, surfaces skill gaps, and gives you a terminal report every morning — so you know exactly which skills to learn next and why.
 
 ---
@@ -213,12 +215,26 @@ Switching providers is a one-line change in `config.yaml`. No code changes neede
 ## Running tests
 
 ```bash
+pip install -r requirements-dev.txt   # app dependencies + pytest
 pytest tests/ -v
 ```
 
 `tests/conftest.py` blanks `DATABASE_URL` so the suite always runs against a
 temporary SQLite file. Never remove it — without it a local `.env` points the
 tests at the hosted Postgres and they will write to production.
+
+### Continuous integration
+
+`.github/workflows/tests.yml` runs the same suite on Python 3.11 (from
+`.python-version`) for every pull request into `master` and every push to
+`master`. A PR that breaks a test shows a red **CI / tests** check before it
+is merged. The job gets no secrets, so it can never reach production.
+
+| Stage | Where | Runs when |
+|---|---|---|
+| CI — test every change | `tests.yml` (GitHub Actions) | PR opened/updated, push to `master` |
+| CD — deploy | Streamlit Cloud | `master` changes |
+| Scheduled agent cycle | `cycle.yml` (GitHub Actions) | Daily 00:30 UTC |
 
 ---
 
